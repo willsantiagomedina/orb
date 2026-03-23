@@ -1177,6 +1177,32 @@ func (m *model) executeCommandAction(action slashAction) tea.Cmd {
 	case actionAgents:
 		m.openAgentsOverlay()
 	case actionResume:
+		if err := m.reloadTasks(); err != nil {
+			m.appendSystemEntry("resume failed to load sessions: "+err.Error(), true)
+			return nil
+		}
+
+		candidateIndexes := make([]int, 0, len(m.tasks))
+		for idx := range m.tasks {
+			if m.tasks[idx].ID == m.taskID {
+				continue
+			}
+			candidateIndexes = append(candidateIndexes, idx)
+		}
+
+		if len(candidateIndexes) == 0 {
+			m.appendSystemEntry("no previous sessions to resume", true)
+			return nil
+		}
+
+		if len(candidateIndexes) == 1 {
+			target := candidateIndexes[0]
+			m.selectTaskByIndex(target)
+			m.appendActivity("system", "resumed session: "+m.tasks[target].Name, true)
+			m.appendSystemEntry("resumed session: "+m.tasks[target].Name, false)
+			return refreshGitCmd(m.currentGitPath())
+		}
+
 		m.openResumeOverlay()
 	case actionSessions:
 		m.openSessionsOverlay()
