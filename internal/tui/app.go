@@ -197,6 +197,8 @@ type model struct {
 	historyDraft  string
 
 	streaming               bool
+	streamSeq               int
+	activeStreamID          int
 	streamCh                <-chan backend.Event
 	cancelFn                context.CancelFunc
 	streamBuffer            string
@@ -230,15 +232,19 @@ type gitRefreshedMsg struct {
 }
 
 type streamStartedMsg struct {
-	stream <-chan backend.Event
-	cancel context.CancelFunc
+	streamID int
+	stream   <-chan backend.Event
+	cancel   context.CancelFunc
 }
 
 type streamEventMsg struct {
-	event backend.Event
+	streamID int
+	event    backend.Event
 }
 
-type streamEndedMsg struct{}
+type streamEndedMsg struct {
+	streamID int
+}
 
 type shellResultMsg struct {
 	toolID   string
@@ -431,6 +437,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	case streamStartedMsg:
+		if typed.streamID <= 0 {
+			return m, nil
+		}
+		m.activeStreamID = typed.streamID
 		m.streamCh = typed.stream
 		m.cancelFn = typed.cancel
 		m.streaming = true
@@ -442,11 +452,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.appendActivity("system", "stream started", true)
 		m.setActiveAgentStatus(agent.StatusThinking)
 		m.startThinkingStatus()
-		return m, tea.Batch(waitForStreamEventCmd(m.streamCh), thinkingTickCmd(), streamWatchTickCmd())
+		return m, tea.Batch(waitForStreamEventCmd(m.streamCh, typed.streamID), thinkingTickCmd(), streamWatchTickCmd())
 	case streamEventMsg:
+		if typed.streamID != m.activeStreamID {
+			return m, nil
+		}
 		m.lastStreamEventAt = time.Now()
 		if m.handleStreamEvent(typed.event) {
-			return m, waitForStreamEventCmd(m.streamCh)
+			return m, waitForStreamEventCmd(m.streamCh, typed.streamID)
 		}
 		m.streaming = false
 		m.streamCh = nil
@@ -457,8 +470,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.thinkingStartedAt = time.Time{}
 		m.streamStartedAt = time.Time{}
 		m.lastStreamEventAt = time.Time{}
+		m.activeStreamID = 0
 		return m, m.dequeueNextPromptCmd()
 	case streamEndedMsg:
+		if typed.streamID != m.activeStreamID {
+			return m, nil
+		}
 		m.streaming = false
 		m.streamCh = nil
 		m.cancelFn = nil
@@ -468,6 +485,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.thinkingStartedAt = time.Time{}
 		m.streamStartedAt = time.Time{}
 		m.lastStreamEventAt = time.Time{}
+		m.activeStreamID = 0
 		m.setActiveAgentStatus(agent.StatusIdle)
 		m.appendActivity("system", "stream ended", true)
 		return m, m.dequeueNextPromptCmd()
@@ -502,6 +520,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.thinkingEntryIndex = -1
 			m.thinkingStartedAt = time.Time{}
 			m.lastStreamEventAt = time.Time{}
+			m.activeStreamID = 0
 			m.streamBuffer = ""
 			for idx := range m.entries {
 				if m.entries[idx].Kind == threadTool && m.entries[idx].ToolStatus == "running" {
@@ -955,6 +974,7 @@ func (m *model) submitPrompt(prompt string, steer bool, mode composeMode) tea.Cm
 		m.thinkingStartedAt = time.Time{}
 		m.streamStartedAt = time.Time{}
 		m.lastStreamEventAt = time.Time{}
+		m.activeStreamID = 0
 		m.streamBuffer = ""
 		m.setActiveAgentStatus(agent.StatusIdle)
 		m.appendActivity("system", "steer: interrupted current stream", true)
@@ -2720,10 +2740,12 @@ func (m *model) startStreamCmd(prompt string) tea.Cmd {
 		m.appendSystemEntry("no backend selected", true)
 		return nil
 	}
-	return startBackendStreamCmd(m.backendClient, prompt, m.currentGitPath())
+	m.streamSeq++
+	streamID := m.streamSeq
+	return startBackendStreamCmd(streamID, m.backendClient, prompt, m.currentGitPath())
 }
 
-func startBackendStreamCmd(activeBackend backend.Backend, prompt string, cwd string) tea.Cmd {
+func startBackendStreamCmd(streamID int, activeBackend backend.Backend, prompt string, cwd string) tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithCancel(context.Background())
 		activeBackend.SetRuntimeWorkingDir(cwd)
@@ -2749,17 +2771,17 @@ func startBackendStreamCmd(activeBackend backend.Backend, prompt string, cwd str
 			},
 		}
 		stream := activeBackend.Stream(ctx, messages, tools)
-		return streamStartedMsg{stream: stream, cancel: cancel}
+		return streamStartedMsg{streamID: streamID, stream: stream, cancel: cancel}
 	}
 }
 
-func waitForStreamEventCmd(stream <-chan backend.Event) tea.Cmd {
+func waitForStreamEventCmd(stream <-chan backend.Event, streamID int) tea.Cmd {
 	return func() tea.Msg {
 		event, ok := <-stream
 		if !ok {
-			return streamEndedMsg{}
+			return streamEndedMsg{streamID: streamID}
 		}
-		return streamEventMsg{event: event}
+		return streamEventMsg{streamID: streamID, event: event}
 	}
 }
 
