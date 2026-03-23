@@ -18,6 +18,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
+	"github.com/willdev/orb/internal/agent"
 	"github.com/willdev/orb/internal/backend"
 	"github.com/willdev/orb/internal/config"
 	"github.com/willdev/orb/internal/gitops"
@@ -43,6 +44,7 @@ type overlayKind int
 const (
 	overlayNone overlayKind = iota
 	overlayHelp
+	overlayAgents
 	overlaySessions
 	overlayDiff
 	overlayGit
@@ -65,6 +67,8 @@ type slashAction int
 
 const (
 	actionNewSession slashAction = iota
+	actionAgents
+	actionNewAgent
 	actionResume
 	actionSessions
 	actionDiff
@@ -157,6 +161,8 @@ type model struct {
 	tasks     []store.Task
 	taskIndex int
 	taskID    string
+	agentPool *agent.Pool
+	taskAgent map[string]string
 
 	entries   []threadEntry
 	activity  []activityEntry
@@ -202,6 +208,7 @@ type model struct {
 	currentModel string
 	currentMode  string
 	composeMode  composeMode
+	activeAgent  string
 }
 
 type splashTickMsg struct{}
@@ -299,6 +306,8 @@ func New(
 		diffLines:               []string{"working tree clean"},
 		taskStore:               taskStore,
 		taskIndex:               0,
+		agentPool:               agent.NewPool(),
+		taskAgent:               make(map[string]string),
 		entries:                 make([]threadEntry, 0, 64),
 		activity:                make([]activityEntry, 0, 128),
 		planItems:               make([]planItem, 0, 12),
@@ -332,6 +341,7 @@ func New(
 	if err := m.reloadTasks(); err != nil {
 		m.appendSystemEntry("task load error: "+err.Error(), true)
 	}
+	m.syncAgentsWithTasks()
 
 	// Orb starts a fresh chat session every launch. Older sessions remain available via /resume.
 	if err := m.createTaskWithName("Task " + time.Now().Format("2006-01-02 15:04:05")); err != nil {
@@ -342,6 +352,7 @@ func New(
 	if err := m.reloadTasks(); err != nil {
 		m.appendSystemEntry("task refresh error: "+err.Error(), true)
 	}
+	m.syncAgentsWithTasks()
 	if len(m.tasks) > 0 {
 		selected := 0
 		for idx := range m.tasks {
@@ -352,6 +363,7 @@ func New(
 		}
 		m.selectTaskByIndex(selected)
 	}
+	m.syncAgentsWithTasks()
 	if err := m.loadThreadForCurrentTask(); err != nil {
 		m.appendSystemEntry("thread load error: "+err.Error(), true)
 	}
@@ -418,6 +430,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.streamBuffer = ""
 		m.streamingAssistantIndex = -1
 		m.appendActivity("system", "stream started", true)
+		m.setActiveAgentStatus(agent.StatusThinking)
 		m.startThinkingStatus()
 		return m, tea.Batch(waitForStreamEventCmd(m.streamCh), thinkingTickCmd())
 	case streamEventMsg:
@@ -438,6 +451,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.streamingAssistantIndex = -1
 		m.thinking = false
 		m.thinkingEntryIndex = -1
+		m.setActiveAgentStatus(agent.StatusIdle)
 		m.appendActivity("system", "stream ended", true)
 		return m, m.dequeueNextPromptCmd()
 	case thinkingTickMsg:
@@ -610,6 +624,9 @@ func (m *model) handleLeaderKey(msg tea.KeyMsg) (tea.Cmd, bool) {
 	if key.Matches(msg, m.keys.NewSession) {
 		return m.executeCommandAction(actionNewSession), false
 	}
+	if key.Matches(msg, m.keys.Agents) {
+		return m.executeCommandAction(actionAgents), false
+	}
 	if key.Matches(msg, m.keys.Sessions) {
 		return m.executeCommandAction(actionSessions), false
 	}
@@ -649,7 +666,7 @@ func (m *model) handleOverlayKey(msg tea.KeyMsg) (tea.Cmd, bool) {
 	}
 
 	switch m.overlay {
-	case overlaySessions, overlayModels, overlayCommandPalette:
+	case overlayAgents, overlaySessions, overlayModels, overlayCommandPalette:
 		switch msg.String() {
 		case "up", "k":
 			m.overlayIndex = clampInt(m.overlayIndex-1, 0, len(m.overlayItems)-1)
@@ -702,6 +719,38 @@ func (m *model) handleOverlaySelection() tea.Cmd {
 	selected := m.overlayItems[clampInt(m.overlayIndex, 0, len(m.overlayItems)-1)]
 
 	switch m.overlay {
+	case overlayAgents:
+		m.closeOverlay()
+		if selected.Action == actionNewAgent {
+			return tea.Batch(m.executeCommandAction(actionNewSession), m.input.Focus())
+		}
+		agentID := strings.TrimSpace(selected.Value)
+		if agentID == "" || m.agentPool == nil {
+			return m.input.Focus()
+		}
+		snapshot, ok := m.agentPool.Get(agentID)
+		if !ok {
+			m.appendActivity("system", "agent not found: "+agentID, false)
+			return m.input.Focus()
+		}
+		m.agentPool.SetActive(agentID)
+		m.activeAgent = agentID
+		targetBackend := backend.NormalizeID(snapshot.BackendID)
+		if targetBackend != m.backendID {
+			if err := m.switchBackend(targetBackend, false); err != nil {
+				m.appendActivity("system", "agent backend switch failed: "+err.Error(), false)
+			}
+		}
+		if strings.TrimSpace(snapshot.TaskID) != "" {
+			for idx := range m.tasks {
+				if m.tasks[idx].ID == snapshot.TaskID {
+					m.selectTaskByIndex(idx)
+					m.appendActivity("system", "switched agent: "+snapshot.Name, true)
+					return tea.Batch(m.input.Focus(), refreshGitCmd(m.currentGitPath()))
+				}
+			}
+		}
+		return m.input.Focus()
 	case overlaySessions:
 		m.closeOverlay()
 		for idx := range m.tasks {
@@ -846,6 +895,7 @@ func (m *model) submitPrompt(prompt string, steer bool, mode composeMode) tea.Cm
 		m.thinkingEntryIndex = -1
 		m.thinkingFrame = 0
 		m.streamBuffer = ""
+		m.setActiveAgentStatus(agent.StatusIdle)
 		m.appendActivity("system", "steer: interrupted current stream", true)
 		m.appendSystemEntry("steer: applying new direction", false)
 	}
@@ -869,6 +919,7 @@ func (m *model) submitShellCommand(command string, requestAssist bool) tea.Cmd {
 		ToolStatus: "running",
 		Timestamp:  time.Now(),
 	})
+	m.setActiveAgentStatus(agent.StatusTool)
 	m.appendActivity("tool", "shell running: "+cleanCommand, true)
 	return runShellCommandCmd(m.currentGitPath(), toolID, cleanCommand, requestAssist)
 }
@@ -930,6 +981,10 @@ func (m *model) switchBackend(id backend.ID, persist bool) error {
 		reasoningEffort = "medium"
 	}
 	m.currentMode = reasoningEffort
+	m.syncAgentsWithTasks()
+	if strings.TrimSpace(m.activeAgent) != "" && m.agentPool != nil {
+		m.agentPool.SetBackend(m.activeAgent, string(selected))
+	}
 
 	if persist {
 		if err := config.SetBackend(m.configPath, string(selected)); err != nil {
@@ -1033,9 +1088,13 @@ func (m *model) executeCommandAction(action slashAction) tea.Cmd {
 			m.appendSystemEntry("session refresh failed: "+err.Error(), true)
 			return nil
 		}
+		m.syncAgentsWithTasks()
 		m.selectTaskByIndex(0)
+		m.syncAgentsWithTasks()
 		m.appendActivity("system", "new session created", true)
 		return refreshGitCmd(m.currentGitPath())
+	case actionAgents:
+		m.openAgentsOverlay()
 	case actionResume:
 		m.openResumeOverlay()
 	case actionSessions:
@@ -1053,6 +1112,7 @@ func (m *model) executeCommandAction(action slashAction) tea.Cmd {
 			m.appendSystemEntry("worktree error: "+err.Error(), true)
 			return nil
 		}
+		m.syncAgentsWithTasks()
 		m.appendSystemEntry("worktree created", false)
 		return refreshGitCmd(m.currentGitPath())
 	case actionCompact:
@@ -1119,6 +1179,51 @@ func (m *model) openHelpOverlay() {
 	m.overlayScroll = 0
 	m.overlayItems = nil
 	m.overlayLines = nil
+}
+
+func (m *model) openAgentsOverlay() {
+	items := []overlayItem{
+		{
+			Title:       "＋ new agent session",
+			Description: "create a parallel task with current backend",
+			Meta:        "ctrl+x a",
+			Action:      actionNewAgent,
+		},
+	}
+
+	activeID := strings.TrimSpace(m.activeAgent)
+	if m.agentPool != nil {
+		agents := m.agentPool.List()
+		for _, snapshot := range agents {
+			indicator := "○"
+			if snapshot.Active {
+				indicator = "●"
+			}
+			meta := strings.TrimSpace(renderAgentStatusBadge(snapshot.Status) + " · " + snapshot.BackendID)
+			items = append(items, overlayItem{
+				Title:       indicator + " " + snapshot.Name,
+				Description: snapshot.SessionName,
+				Meta:        meta,
+				Value:       snapshot.ID,
+				Action:      actionAgents,
+			})
+		}
+	}
+
+	selected := 0
+	for idx := range items {
+		if strings.TrimSpace(items[idx].Value) == activeID {
+			selected = idx
+			break
+		}
+	}
+
+	m.overlay = overlayAgents
+	m.overlayItems = items
+	m.overlayLines = nil
+	m.overlayScroll = 0
+	m.overlayFilter = ""
+	m.overlayIndex = selected
 }
 
 func (m *model) openSessionsOverlay() {
@@ -1328,6 +1433,8 @@ func (m *model) closeOverlay() {
 }
 
 func (m *model) reloadTasks() error {
+	defer m.syncAgentsWithTasks()
+
 	if m.taskStore == nil {
 		m.tasks = nil
 		m.taskID = ""
@@ -1376,6 +1483,7 @@ func (m *model) selectTaskByIndex(index int) {
 	idx := clampInt(index, 0, len(m.tasks)-1)
 	m.taskIndex = idx
 	m.taskID = m.tasks[idx].ID
+	m.syncAgentsWithTasks()
 	if err := m.loadThreadForCurrentTask(); err != nil {
 		m.appendSystemEntry("thread load error: "+err.Error(), true)
 	}
@@ -1511,6 +1619,92 @@ func (m model) currentGitPath() string {
 	return m.repoBase
 }
 
+func (m *model) syncAgentsWithTasks() {
+	if m.agentPool == nil {
+		return
+	}
+	if m.taskAgent == nil {
+		m.taskAgent = make(map[string]string)
+	}
+
+	existingTask := make(map[string]bool, len(m.tasks))
+	for _, task := range m.tasks {
+		taskID := strings.TrimSpace(task.ID)
+		if taskID == "" {
+			continue
+		}
+		existingTask[taskID] = true
+
+		agentID := strings.TrimSpace(m.taskAgent[taskID])
+		if agentID == "" {
+			created, err := m.agentPool.Create(agent.CreateInput{
+				Name:        task.Name,
+				BackendID:   string(m.backendID),
+				SessionName: task.Name,
+				TaskID:      task.ID,
+				Worktree:    task.Worktree,
+			})
+			if err != nil {
+				m.appendActivity("system", "create agent failed: "+err.Error(), false)
+				continue
+			}
+			agentID = created.ID
+			m.taskAgent[taskID] = agentID
+		}
+
+		m.agentPool.SetSession(agentID, task.Name)
+		m.agentPool.SetTask(agentID, task.ID)
+		m.agentPool.SetWorktree(agentID, task.Worktree)
+	}
+
+	for taskID := range m.taskAgent {
+		if !existingTask[taskID] {
+			delete(m.taskAgent, taskID)
+		}
+	}
+
+	currentTaskID := strings.TrimSpace(m.taskID)
+	if currentTaskID != "" {
+		if currentAgentID, ok := m.taskAgent[currentTaskID]; ok {
+			if m.agentPool.SetActive(currentAgentID) {
+				m.activeAgent = currentAgentID
+			}
+		}
+	}
+
+	if strings.TrimSpace(m.activeAgent) == "" {
+		agents := m.agentPool.List()
+		if len(agents) > 0 {
+			m.activeAgent = agents[0].ID
+			m.agentPool.SetActive(m.activeAgent)
+		}
+	}
+}
+
+func (m *model) setActiveAgentStatus(status agent.Status) {
+	if m.agentPool == nil {
+		return
+	}
+	if strings.TrimSpace(m.activeAgent) == "" {
+		m.syncAgentsWithTasks()
+	}
+	if strings.TrimSpace(m.activeAgent) == "" {
+		return
+	}
+	m.agentPool.SetStatus(m.activeAgent, status)
+}
+
+func (m model) activeAgentSnapshot() (agent.Snapshot, bool) {
+	if m.agentPool == nil {
+		return agent.Snapshot{}, false
+	}
+	activeID := strings.TrimSpace(m.activeAgent)
+	if activeID == "" {
+		return m.agentPool.Active()
+	}
+	return m.agentPool.Get(activeID)
+}
+
 func (m *model) appendEntry(entry threadEntry) {
 	m.entries = append(m.entries, entry)
 	if len(m.entries) > 1000 {
@@ -1596,6 +1790,7 @@ func (m *model) handleStreamEvent(event backend.Event) bool {
 		if token == "" {
 			return true
 		}
+		m.setActiveAgentStatus(agent.StatusThinking)
 		if m.thinking {
 			m.thinking = false
 			m.setThinkingText("thinking complete")
@@ -1639,11 +1834,13 @@ func (m *model) handleStreamEvent(event backend.Event) bool {
 					}
 					delete(m.runningToolByID, typed.ID)
 					m.appendActivity("tool", baseName+" done", true)
+					m.setActiveAgentStatus(agent.StatusThinking)
 				} else {
 					m.entries[idx].ToolName = baseName
 					m.entries[idx].ToolArgs = args
 					m.entries[idx].ToolStatus = "running"
 					m.appendActivity("tool", baseName+" running", true)
+					m.setActiveAgentStatus(agent.StatusTool)
 				}
 			} else {
 				status := "running"
@@ -1666,8 +1863,10 @@ func (m *model) handleStreamEvent(event backend.Event) bool {
 				if status == "running" {
 					m.runningToolByID[typed.ID] = len(m.entries) - 1
 					m.appendActivity("tool", baseName+" running", true)
+					m.setActiveAgentStatus(agent.StatusTool)
 				} else {
 					m.appendActivity("tool", baseName+" done", true)
+					m.setActiveAgentStatus(agent.StatusThinking)
 				}
 			}
 			m.refreshViewport(true)
@@ -1681,6 +1880,9 @@ func (m *model) handleStreamEvent(event backend.Event) bool {
 		if strings.Contains(strings.ToLower(name), "error") {
 			status = "error"
 		}
+		if status == "running" {
+			m.setActiveAgentStatus(agent.StatusTool)
+		}
 
 		m.entries = append(m.entries, threadEntry{
 			Kind:       threadTool,
@@ -1693,6 +1895,7 @@ func (m *model) handleStreamEvent(event backend.Event) bool {
 		m.appendActivity("tool", baseName+" "+status, status != "error")
 		return true
 	case backend.DoneEvent:
+		m.setActiveAgentStatus(agent.StatusIdle)
 		m.thinking = false
 		if m.streamingAssistantIndex < 0 && m.thinkingEntryIndex >= 0 {
 			m.setThinkingText("no assistant output returned")
@@ -1722,6 +1925,7 @@ func (m *model) handleStreamEvent(event backend.Event) bool {
 		m.refreshViewport(true)
 		return false
 	case backend.ErrorEvent:
+		m.setActiveAgentStatus(agent.StatusIdle)
 		if m.thinkingEntryIndex >= 0 {
 			m.setThinkingText("stream failed before assistant output")
 		}
@@ -1783,6 +1987,9 @@ func (m *model) handleShellResult(result shellResultMsg) tea.Cmd {
 	} else {
 		m.appendActivity("tool", "shell done: "+result.command, true)
 		m.persistMessage("tool", result.command+"\n"+summary)
+	}
+	if !m.streaming {
+		m.setActiveAgentStatus(agent.StatusIdle)
 	}
 	m.refreshViewport(true)
 	if !result.assist {
@@ -2141,6 +2348,17 @@ func (m model) renderSidebar(width int, height int) string {
 
 	lines = append(lines, sidebarSectionHeader("SESSION", innerWidth))
 	lines = append(lines, sidebarKeyValueRow("events", fmt.Sprintf("%d", len(m.activity)), innerWidth))
+	agentName := "n/a"
+	agentMode := "idle"
+	if snapshot, ok := m.activeAgentSnapshot(); ok {
+		agentName = strings.TrimSpace(snapshot.Name)
+		if agentName == "" {
+			agentName = snapshot.ID
+		}
+		agentMode = agentStatusLabel(snapshot.Status)
+	}
+	lines = append(lines, sidebarKeyValueRow("agent", agentName, innerWidth))
+	lines = append(lines, sidebarKeyValueRow("status", agentMode, innerWidth))
 	lines = append(lines, sidebarKeyValueRow("backend", string(m.backendID), innerWidth))
 	lines = append(lines, sidebarKeyValueRow("model", m.currentModel, innerWidth))
 	lines = append(lines, sidebarKeyValueRow("mode", displayModeLabel(m.currentModel, m.currentMode), innerWidth))
@@ -2186,6 +2404,8 @@ func (m model) renderOverlayBox(contentHeight int) string {
 	switch m.overlay {
 	case overlayHelp:
 		return m.renderHelpOverlay(overlayWidth, overlayHeight, innerWidth, innerHeight)
+	case overlayAgents:
+		return m.renderSelectionOverlay("agents", overlayWidth, overlayHeight, innerWidth, innerHeight)
 	case overlaySessions:
 		title := "sessions"
 		if m.resumeOnly {
@@ -2265,10 +2485,16 @@ func (m model) renderSelectionOverlay(title string, overlayWidth int, overlayHei
 		for idx := start; idx < end; idx++ {
 			item := m.overlayItems[idx]
 			prefix := "○"
+			if m.overlay == overlayAgents {
+				prefix = ""
+			}
 			if m.overlay == overlaySessions && item.Value == m.taskID {
 				prefix = "●"
 			}
-			left := prefix + " " + item.Title
+			left := item.Title
+			if prefix != "" {
+				left = prefix + " " + item.Title
+			}
 			if item.Description != "" {
 				left += "  " + item.Description
 			}
@@ -2736,6 +2962,28 @@ func sidebarPlanRow(item planItem, width int) string {
 	return marker + " " + theme.SidebarValue.Render(text)
 }
 
+func agentStatusLabel(status agent.Status) string {
+	switch status {
+	case agent.StatusThinking:
+		return "thinking"
+	case agent.StatusTool:
+		return "tool"
+	default:
+		return "idle"
+	}
+}
+
+func renderAgentStatusBadge(status agent.Status) string {
+	switch status {
+	case agent.StatusThinking:
+		return theme.ToolStatusRun.Render("◐ thinking")
+	case agent.StatusTool:
+		return theme.ToolStatusRun.Render("◉ tool")
+	default:
+		return theme.ToolStatusDone.Render("○ idle")
+	}
+}
+
 func clampPlainLines(lines []string, width int, height int) []string {
 	if width <= 0 || height <= 0 {
 		return []string{}
@@ -2846,6 +3094,7 @@ func wrappedInputLineCount(value string, width int) int {
 func defaultSlashCommands() []slashCommand {
 	return []slashCommand{
 		{Command: "/new", Description: "Start a new task/session", Keybind: "ctrl+x n", Action: actionNewSession},
+		{Command: "/agents", Description: "Open agent switcher", Keybind: "ctrl+x a", Action: actionAgents},
 		{Command: "/resume", Description: "Resume an older chat session", Keybind: "ctrl+x s", Action: actionResume},
 		{Command: "/sessions", Description: "Browse and switch sessions", Keybind: "ctrl+x s", Action: actionSessions},
 		{Command: "/diff", Description: "Open diff viewer overlay", Keybind: "ctrl+x d", Action: actionDiff},

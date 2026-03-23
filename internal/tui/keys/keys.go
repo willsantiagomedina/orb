@@ -6,6 +6,7 @@ import "github.com/charmbracelet/bubbles/key"
 type KeyMap struct {
 	Leader      key.Binding
 	NewSession  key.Binding
+	Agents      key.Binding
 	Sessions    key.Binding
 	Diff        key.Binding
 	Git         key.Binding
@@ -37,6 +38,10 @@ func Default() KeyMap {
 		NewSession: key.NewBinding(
 			key.WithKeys("n"),
 			key.WithHelp("ctrl+x n", "new session"),
+		),
+		Agents: key.NewBinding(
+			key.WithKeys("a"),
+			key.WithHelp("ctrl+x a", "agents"),
 		),
 		Sessions: key.NewBinding(
 			key.WithKeys("s"),
@@ -117,7 +122,7 @@ func Default() KeyMap {
 func (k KeyMap) FullHelp() [][]key.Binding {
 	return [][]key.Binding{
 		{k.Leader, k.CommandPalette, k.Help, k.Quit},
-		{k.NewSession, k.Sessions, k.Diff, k.Git, k.Log},
+		{k.NewSession, k.Agents, k.Sessions, k.Diff, k.Git, k.Log},
 		{k.ModelSwitch, k.Worktree, k.Compact, k.Export, k.OpenEditor},
 		{k.ComposeMode, k.ScrollBottom, k.ScrollUpHalf, k.ScrollDownHalf, k.Send, k.Dismiss},
 	}
