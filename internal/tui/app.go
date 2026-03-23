@@ -2,7 +2,6 @@ package tui
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -19,7 +18,8 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
-	"github.com/willdev/orb/internal/codex"
+	"github.com/willdev/orb/internal/backend"
+	"github.com/willdev/orb/internal/config"
 	"github.com/willdev/orb/internal/gitops"
 	"github.com/willdev/orb/internal/store"
 	"github.com/willdev/orb/internal/tui/keys"
@@ -143,8 +143,11 @@ type model struct {
 	splashFrame int
 
 	version       string
+	configPath    string
 	authStatus    string
 	authConnected bool
+	backendID     backend.ID
+	backendClient backend.Backend
 	repoBase      string
 	branch        string
 	gitStatus     string
@@ -186,7 +189,7 @@ type model struct {
 	historyDraft  string
 
 	streaming               bool
-	streamCh                <-chan codex.Event
+	streamCh                <-chan backend.Event
 	cancelFn                context.CancelFunc
 	streamBuffer            string
 	streamingAssistantIndex int
@@ -213,12 +216,12 @@ type gitRefreshedMsg struct {
 }
 
 type streamStartedMsg struct {
-	stream <-chan codex.Event
+	stream <-chan backend.Event
 	cancel context.CancelFunc
 }
 
 type streamEventMsg struct {
-	event codex.Event
+	event backend.Event
 }
 
 type streamEndedMsg struct{}
@@ -239,7 +242,14 @@ var (
 )
 
 // New returns Orb's OpenCode-style root Bubble Tea model.
-func New(version string, authStatus string, taskStore *store.Store, repoBasePath string, scrollSpeed int) tea.Model {
+func New(
+	version string,
+	authStatus string,
+	taskStore *store.Store,
+	repoBasePath string,
+	configPath string,
+	scrollSpeed int,
+) tea.Model {
 	basePath := strings.TrimSpace(repoBasePath)
 	if basePath == "" {
 		cwd, err := os.Getwd()
@@ -270,15 +280,6 @@ func New(version string, authStatus string, taskStore *store.Store, repoBasePath
 	input.FocusedStyle.CursorLine = lipgloss.NewStyle().Background(theme.BG1)
 	input.BlurredStyle = input.FocusedStyle
 
-	currentModel, err := codex.CurrentModel()
-	if err != nil || strings.TrimSpace(currentModel) == "" {
-		currentModel = "gpt-5.4"
-	}
-	currentEffort, effortErr := codex.CurrentReasoningEffort()
-	if effortErr != nil || strings.TrimSpace(currentEffort) == "" {
-		currentEffort = "medium"
-	}
-
 	resolvedScrollSpeed := scrollSpeed
 	if resolvedScrollSpeed <= 0 {
 		resolvedScrollSpeed = defaultScrollSpeed
@@ -288,8 +289,10 @@ func New(version string, authStatus string, taskStore *store.Store, repoBasePath
 		showSplash:              true,
 		splashFrame:             0,
 		version:                 version,
+		configPath:              strings.TrimSpace(configPath),
 		authStatus:              authStatus,
 		authConnected:           !strings.Contains(strings.ToLower(authStatus), "no auth"),
+		backendID:               backend.CodexID,
 		repoBase:                basePath,
 		branch:                  "n/a",
 		gitStatus:               "status unavailable",
@@ -317,11 +320,14 @@ func New(version string, authStatus string, taskStore *store.Store, repoBasePath
 		runningToolByID:         make(map[string]int),
 		queuedPrompts:           []string{},
 		thinkingEntryIndex:      -1,
-		currentModel:            currentModel,
-		currentMode:             currentEffort,
+		currentModel:            "gpt-5.4",
+		currentMode:             "medium",
 		composeMode:             composeModeAgent,
 	}
 	m.applyComposeMode()
+	if err := m.loadBackendFromConfig(); err != nil {
+		m.appendSystemEntry("backend setup error: "+err.Error(), true)
+	}
 
 	if err := m.reloadTasks(); err != nil {
 		m.appendSystemEntry("task load error: "+err.Error(), true)
@@ -709,18 +715,26 @@ func (m *model) handleOverlaySelection() tea.Cmd {
 	case overlayModels:
 		value := strings.TrimSpace(selected.Value)
 		switch {
+		case strings.HasPrefix(value, "backend:"):
+			backendID := backend.NormalizeID(strings.TrimSpace(strings.TrimPrefix(value, "backend:")))
+			if err := m.switchBackend(backendID, true); err != nil {
+				m.appendSystemEntry("backend switch failed: "+err.Error(), true)
+				return nil
+			}
+			m.appendActivity("system", "backend switched to "+string(backendID), true)
+			m.appendSystemEntry("backend switched to "+string(backendID), false)
 		case strings.HasPrefix(value, "model:"):
 			modelName := strings.TrimSpace(strings.TrimPrefix(value, "model:"))
-			if modelName != "" {
-				codex.SetRuntimeModel(modelName)
+			if modelName != "" && m.backendClient != nil {
+				m.backendClient.SetRuntimeModel(modelName)
 				m.currentModel = modelName
 				m.appendActivity("system", "model switched to "+modelName, true)
 				m.appendSystemEntry("model switched to "+modelName, false)
 			}
 		case strings.HasPrefix(value, "effort:"):
 			effort := strings.TrimSpace(strings.TrimPrefix(value, "effort:"))
-			if effort != "" {
-				codex.SetRuntimeReasoningEffort(effort)
+			if effort != "" && m.backendClient != nil {
+				m.backendClient.SetRuntimeReasoningEffort(effort)
 				m.currentMode = effort
 				label := reasoningModeLabel(effort)
 				m.appendActivity("system", "reasoning mode switched to "+label, true)
@@ -836,7 +850,7 @@ func (m *model) submitPrompt(prompt string, steer bool, mode composeMode) tea.Cm
 		m.appendSystemEntry("steer: applying new direction", false)
 	}
 
-	return startCodexStreamCmd(finalPrompt, m.currentGitPath())
+	return m.startStreamCmd(finalPrompt)
 }
 
 func (m *model) submitShellCommand(command string, requestAssist bool) tea.Cmd {
@@ -861,6 +875,68 @@ func (m *model) submitShellCommand(command string, requestAssist bool) tea.Cmd {
 
 func (m *model) applyComposeMode() {
 	m.input.Placeholder = composeModePlaceholder(m.composeMode)
+}
+
+func (m *model) loadBackendFromConfig() error {
+	selectedBackend, err := backend.ResolveConfiguredID(m.configPath)
+	if err != nil {
+		if switchErr := m.switchBackend(backend.CodexID, false); switchErr != nil {
+			return fmt.Errorf("fallback to codex backend after config error: %w", switchErr)
+		}
+		return fmt.Errorf("resolve backend from config: %w", err)
+	}
+	return m.switchBackend(selectedBackend, false)
+}
+
+func (m *model) switchBackend(id backend.ID, persist bool) error {
+	selected := backend.NormalizeID(string(id))
+	client, err := backend.New(selected, m.configPath)
+	if err != nil {
+		return fmt.Errorf("initialize backend %q: %w", selected, err)
+	}
+
+	m.backendClient = client
+	m.backendID = selected
+
+	status, connected, statusErr := client.AuthStatus()
+	if statusErr != nil {
+		m.appendActivity("error", "backend auth status failed: "+statusErr.Error(), false)
+		status = "● no auth"
+		connected = false
+	}
+	if strings.TrimSpace(status) != "" {
+		m.authStatus = status
+	}
+	m.authConnected = connected
+
+	modelName, modelErr := client.CurrentModel()
+	if modelErr != nil {
+		m.appendActivity("error", "backend model resolution failed: "+modelErr.Error(), false)
+		modelName = defaultModelForBackend(selected)
+	}
+	modelName = strings.TrimSpace(modelName)
+	if modelName == "" {
+		modelName = defaultModelForBackend(selected)
+	}
+	m.currentModel = modelName
+
+	reasoningEffort, effortErr := client.CurrentReasoningEffort()
+	if effortErr != nil {
+		m.appendActivity("error", "backend reasoning mode resolution failed: "+effortErr.Error(), false)
+		reasoningEffort = "medium"
+	}
+	reasoningEffort = strings.TrimSpace(reasoningEffort)
+	if reasoningEffort == "" {
+		reasoningEffort = "medium"
+	}
+	m.currentMode = reasoningEffort
+
+	if persist {
+		if err := config.SetBackend(m.configPath, string(selected)); err != nil {
+			return fmt.Errorf("persist backend selection %q: %w", selected, err)
+		}
+	}
+	return nil
 }
 
 func (m *model) cycleComposeMode(forward bool) {
@@ -940,7 +1016,7 @@ func (m *model) dequeueNextPromptCmd() tea.Cmd {
 			continue
 		}
 		m.appendActivity("system", fmt.Sprintf("sending queued prompt (%d left)", len(m.queuedPrompts)), true)
-		return startCodexStreamCmd(next, m.currentGitPath())
+		return m.startStreamCmd(next)
 	}
 	return nil
 }
@@ -997,12 +1073,20 @@ func (m *model) executeCommandAction(action slashAction) tea.Cmd {
 		m.updateSlashMenu()
 		return m.input.Focus()
 	case actionFast:
-		codex.SetRuntimeModel(fastModeModel)
-		codex.SetRuntimeReasoningEffort("low")
-		m.currentModel = fastModeModel
+		if m.backendClient == nil {
+			m.appendSystemEntry("no backend available for fast mode", true)
+			return nil
+		}
+		targetModel := fastModeModel
+		if m.backendID == backend.ClaudeID {
+			targetModel = "sonnet"
+		}
+		m.backendClient.SetRuntimeModel(targetModel)
+		m.backendClient.SetRuntimeReasoningEffort("low")
+		m.currentModel = targetModel
 		m.currentMode = "low"
 		m.appendActivity("system", "fast mode enabled", true)
-		m.appendSystemEntry("fast mode enabled ("+fastModeModel+" + low reasoning)", false)
+		m.appendSystemEntry("fast mode enabled ("+targetModel+" + low reasoning)", false)
 	case actionHelp:
 		m.openHelpOverlay()
 	case actionExit:
@@ -1093,19 +1177,46 @@ func (m *model) openResumeOverlay() {
 }
 
 func (m *model) openModelsOverlay() {
-	available := codex.AvailableModels()
+	available := []string{}
+	if m.backendClient != nil {
+		available = m.backendClient.AvailableModels()
+	}
+	if len(available) == 0 {
+		available = []string{"gpt-5.4"}
+	}
 	modeOptions := reasoningModeOptions()
-	items := make([]overlayItem, 0, len(available)+len(modeOptions))
+	items := make([]overlayItem, 0, len(available)+len(modeOptions)+len(backend.IDs()))
 	selectedIndex := 0
-	for idx, modelName := range available {
+
+	for idx, backendID := range backend.IDs() {
 		meta := ""
-		if modelName == m.currentModel {
+		if backendID == m.backendID {
 			meta = "current"
 			selectedIndex = idx
 		}
 		items = append(items, overlayItem{
+			Title:       "backend " + string(backendID),
+			Description: "runtime backend",
+			Meta:        meta,
+			Value:       "backend:" + string(backendID),
+			Action:      actionModels,
+		})
+	}
+
+	modelStart := len(items)
+	modelDescription := "backend model"
+	if m.backendClient != nil {
+		modelDescription = m.backendClient.Label() + " model"
+	}
+	for idx, modelName := range available {
+		meta := ""
+		if modelName == m.currentModel {
+			meta = "current"
+			selectedIndex = modelStart + idx
+		}
+		items = append(items, overlayItem{
 			Title:       "model " + modelName,
-			Description: "Codex model",
+			Description: modelDescription,
 			Meta:        meta,
 			Value:       "model:" + modelName,
 			Action:      actionModels,
@@ -1432,9 +1543,13 @@ func (m *model) appendActivity(kind string, text string, success bool) {
 }
 
 func (m *model) startThinkingStatus() {
+	backendLabel := "backend"
+	if m.backendClient != nil {
+		backendLabel = strings.ToLower(strings.TrimSpace(m.backendClient.Label()))
+	}
 	entry := threadEntry{
 		Kind:      threadReasoning,
-		Text:      "connecting to codex...",
+		Text:      "connecting to " + backendLabel + "...",
 		Timestamp: time.Now(),
 	}
 	m.entries = append(m.entries, entry)
@@ -1457,10 +1572,10 @@ func (m *model) setThinkingText(text string) {
 
 func (m *model) advanceThinkingStatus() {
 	frames := []string{
-		"connecting to codex",
-		"connecting to codex.",
-		"connecting to codex..",
-		"connecting to codex...",
+		"connecting to backend",
+		"connecting to backend.",
+		"connecting to backend..",
+		"connecting to backend...",
 		"thinking",
 		"thinking.",
 		"thinking..",
@@ -1474,9 +1589,9 @@ func (m *model) advanceThinkingStatus() {
 	m.setThinkingText(text)
 }
 
-func (m *model) handleStreamEvent(event codex.Event) bool {
+func (m *model) handleStreamEvent(event backend.Event) bool {
 	switch typed := event.(type) {
-	case codex.TokenEvent:
+	case backend.TokenEvent:
 		token := typed.Token
 		if token == "" {
 			return true
@@ -1499,7 +1614,7 @@ func (m *model) handleStreamEvent(event codex.Event) bool {
 		}
 		m.refreshViewport(true)
 		return true
-	case codex.ToolCallEvent:
+	case backend.ToolCallEvent:
 		name := strings.TrimSpace(typed.Name)
 		if name == "" {
 			name = "tool"
@@ -1577,7 +1692,7 @@ func (m *model) handleStreamEvent(event codex.Event) bool {
 		m.refreshViewport(true)
 		m.appendActivity("tool", baseName+" "+status, status != "error")
 		return true
-	case codex.DoneEvent:
+	case backend.DoneEvent:
 		m.thinking = false
 		if m.streamingAssistantIndex < 0 && m.thinkingEntryIndex >= 0 {
 			m.setThinkingText("no assistant output returned")
@@ -1606,7 +1721,7 @@ func (m *model) handleStreamEvent(event codex.Event) bool {
 		m.appendActivity("system", "stream complete", true)
 		m.refreshViewport(true)
 		return false
-	case codex.ErrorEvent:
+	case backend.ErrorEvent:
 		if m.thinkingEntryIndex >= 0 {
 			m.setThinkingText("stream failed before assistant output")
 		}
@@ -1684,7 +1799,7 @@ func (m *model) handleShellResult(result shellResultMsg) tea.Cmd {
 		return nil
 	}
 	m.appendActivity("system", "terminal analysis started", true)
-	return startCodexStreamCmd(assistPrompt, m.currentGitPath())
+	return m.startStreamCmd(assistPrompt)
 }
 
 func (m *model) updateSlashMenu() {
@@ -1859,6 +1974,7 @@ func (m model) renderHeader() string {
 	left := logo + " " + theme.HeaderDivider.Render("│") + " " + theme.HeaderSession.Render(sessionName)
 
 	rightParts := []string{
+		theme.HeaderModel.Render("backend:" + string(m.backendID)),
 		theme.HeaderModel.Render(m.currentModel),
 		theme.HeaderModel.Render("mode:" + displayModeLabel(m.currentModel, m.currentMode)),
 		theme.HeaderModel.Render("input:" + composeModeLabel(m.composeMode)),
@@ -2025,6 +2141,7 @@ func (m model) renderSidebar(width int, height int) string {
 
 	lines = append(lines, sidebarSectionHeader("SESSION", innerWidth))
 	lines = append(lines, sidebarKeyValueRow("events", fmt.Sprintf("%d", len(m.activity)), innerWidth))
+	lines = append(lines, sidebarKeyValueRow("backend", string(m.backendID), innerWidth))
 	lines = append(lines, sidebarKeyValueRow("model", m.currentModel, innerWidth))
 	lines = append(lines, sidebarKeyValueRow("mode", displayModeLabel(m.currentModel, m.currentMode), innerWidth))
 	lines = append(lines, sidebarKeyValueRow("input", composeModeLabel(m.composeMode), innerWidth))
@@ -2273,22 +2390,30 @@ func (m *model) exportCurrentSession() (string, error) {
 	return path, nil
 }
 
-func startCodexStreamCmd(prompt string, cwd string) tea.Cmd {
+func (m *model) startStreamCmd(prompt string) tea.Cmd {
+	if m.backendClient == nil {
+		m.appendSystemEntry("no backend selected", true)
+		return nil
+	}
+	return startBackendStreamCmd(m.backendClient, prompt, m.currentGitPath())
+}
+
+func startBackendStreamCmd(activeBackend backend.Backend, prompt string, cwd string) tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithCancel(context.Background())
-		codex.SetRuntimeWorkingDir(cwd)
-		toolParams := json.RawMessage(`{"type":"object","properties":{"text":{"type":"string"}},"required":["text"],"additionalProperties":false}`)
-		tools := []codex.ToolDefinition{
+		activeBackend.SetRuntimeWorkingDir(cwd)
+		toolParams := []byte(`{"type":"object","properties":{"text":{"type":"string"}},"required":["text"],"additionalProperties":false}`)
+		tools := []backend.ToolDefinition{
 			{
 				Type: "function",
-				Function: codex.ToolFunctionDefinition{
+				Function: backend.ToolFunctionDefinition{
 					Name:        "echo_tool",
 					Description: "Echoes text for Orb tool-call stream rendering.",
 					Parameters:  toolParams,
 				},
 			},
 		}
-		messages := []codex.Message{
+		messages := []backend.Message{
 			{
 				Role:    "system",
 				Content: "You are Orb, a concise software engineering agent.",
@@ -2298,12 +2423,12 @@ func startCodexStreamCmd(prompt string, cwd string) tea.Cmd {
 				Content: prompt,
 			},
 		}
-		stream := codex.Stream(ctx, messages, tools)
+		stream := activeBackend.Stream(ctx, messages, tools)
 		return streamStartedMsg{stream: stream, cancel: cancel}
 	}
 }
 
-func waitForStreamEventCmd(stream <-chan codex.Event) tea.Cmd {
+func waitForStreamEventCmd(stream <-chan backend.Event) tea.Cmd {
 	return func() tea.Msg {
 		event, ok := <-stream
 		if !ok {
@@ -2726,7 +2851,7 @@ func defaultSlashCommands() []slashCommand {
 		{Command: "/diff", Description: "Open diff viewer overlay", Keybind: "ctrl+x d", Action: actionDiff},
 		{Command: "/git", Description: "Open git status overlay", Keybind: "ctrl+x g", Action: actionGit},
 		{Command: "/log", Description: "Open activity log overlay", Keybind: "ctrl+x l", Action: actionLog},
-		{Command: "/models", Description: "Switch model and mode", Keybind: "ctrl+x m", Action: actionModels},
+		{Command: "/models", Description: "Switch backend, model, and mode", Keybind: "ctrl+x m", Action: actionModels},
 		{Command: "/mode", Description: "Switch low/medium/high/xhigh", Keybind: "ctrl+x m", Action: actionModels},
 		{Command: "/worktree", Description: "Create git worktree for task", Keybind: "ctrl+x w", Action: actionWorktree},
 		{Command: "/compact", Description: "Summarize and compact session", Keybind: "ctrl+x c", Action: actionCompact},
@@ -2767,6 +2892,15 @@ func displayModeLabel(modelName string, effort string) string {
 		return "fast"
 	}
 	return reasoningModeLabel(effort)
+}
+
+func defaultModelForBackend(id backend.ID) string {
+	switch id {
+	case backend.ClaudeID:
+		return "sonnet"
+	default:
+		return "gpt-5.4"
+	}
 }
 
 func composeModeLabel(mode composeMode) string {

@@ -10,6 +10,10 @@ model = "gpt-5.4"
 # Reasoning mode: fast|normal|high|max (mapped to low|medium|high|xhigh).
 reasoning_effort = "normal"
 
+[codex]
+# Active backend runtime: codex or claude.
+backend = "codex"
+
 [tui]
 # Scroll speed multiplier for ctrl+u / ctrl+d viewport movement.
 scroll_speed = 3

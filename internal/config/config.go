@@ -15,7 +15,13 @@ type Config struct {
 	APIKey          string `toml:"api_key"`
 	Model           string `toml:"model"`
 	ReasoningEffort string `toml:"reasoning_effort"`
+	Codex           Codex  `toml:"codex"`
 	TUI             TUI    `toml:"tui"`
+}
+
+// Codex stores backend-related runtime selection.
+type Codex struct {
+	Backend string `toml:"backend"`
 }
 
 // TUI contains terminal UI specific settings.
@@ -61,10 +67,56 @@ func Load(path string) (Config, error) {
 	cfg.APIKey = strings.TrimSpace(cfg.APIKey)
 	cfg.Model = strings.TrimSpace(cfg.Model)
 	cfg.ReasoningEffort = strings.TrimSpace(cfg.ReasoningEffort)
+	cfg.Codex.Backend = normalizeBackendID(cfg.Codex.Backend)
 	if cfg.TUI.ScrollSpeed <= 0 {
 		cfg.TUI.ScrollSpeed = 3
 	}
 	return cfg, nil
+}
+
+// Save writes orb.toml to path, or DefaultPath when path is empty.
+func Save(path string, cfg Config) error {
+	resolvedPath, err := resolvePath(path)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(resolvedPath), 0o755); err != nil {
+		return fmt.Errorf("create config directory for %q: %w", resolvedPath, err)
+	}
+
+	cfg.APIKey = strings.TrimSpace(cfg.APIKey)
+	cfg.Model = strings.TrimSpace(cfg.Model)
+	cfg.ReasoningEffort = strings.TrimSpace(cfg.ReasoningEffort)
+	cfg.Codex.Backend = normalizeBackendID(cfg.Codex.Backend)
+	if cfg.TUI.ScrollSpeed <= 0 {
+		cfg.TUI.ScrollSpeed = 3
+	}
+
+	file, err := os.Create(resolvedPath)
+	if err != nil {
+		return fmt.Errorf("create config file %q: %w", resolvedPath, err)
+	}
+	defer func() {
+		_ = file.Close()
+	}()
+
+	if err := toml.NewEncoder(file).Encode(cfg); err != nil {
+		return fmt.Errorf("encode config %q: %w", resolvedPath, err)
+	}
+	return nil
+}
+
+// SetBackend updates the configured backend and persists orb.toml.
+func SetBackend(path string, backend string) error {
+	cfg, err := Load(path)
+	if err != nil {
+		return fmt.Errorf("load config to set backend: %w", err)
+	}
+	cfg.Codex.Backend = normalizeBackendID(backend)
+	if err := Save(path, cfg); err != nil {
+		return fmt.Errorf("save backend selection: %w", err)
+	}
+	return nil
 }
 
 func resolvePath(path string) (string, error) {
@@ -79,4 +131,13 @@ func resolvePath(path string) (string, error) {
 	}
 
 	return defaultPath, nil
+}
+
+func normalizeBackendID(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "claude":
+		return "claude"
+	default:
+		return "codex"
+	}
 }

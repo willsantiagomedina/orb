@@ -54,7 +54,7 @@ func main() {
 	}
 
 	program := tea.NewProgram(
-		tui.New(version, authStatus, taskStore, workingDir, cfg.TUI.ScrollSpeed),
+		tui.New(version, authStatus, taskStore, workingDir, *cfgPath, cfg.TUI.ScrollSpeed),
 		tea.WithAltScreen(),
 		tea.WithMouseCellMotion(),
 	)
