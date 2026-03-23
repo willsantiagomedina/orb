@@ -228,7 +228,7 @@ func Stream(ctx context.Context, messages []Message, toolDefs []ToolDefinition) 
 
 		attemptErrors := make([]string, 0, len(credentials)+1)
 
-		if shouldUseCodexCLI() {
+		if shouldUseCodexCLI() && !hasAPIKeyCredential {
 			err = streamWithCodexCLI(ctx, modelName, reasoningEffort, messages, events)
 			if err == nil {
 				return

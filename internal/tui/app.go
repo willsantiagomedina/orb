@@ -28,15 +28,17 @@ import (
 )
 
 const (
-	gitRefreshInterval = 3 * time.Second
-	gitRefreshTimeout  = 4 * time.Second
-	worktreeTimeout    = 30 * time.Second
-	splashFrameDelay   = 112 * time.Millisecond
-	splashFrameCount   = 8
-	defaultScrollSpeed = 3
-	minLayoutWidth     = 60
-	inputPrompt        = "> "
-	fastModeModel      = "gpt-5.1-codex-mini"
+	gitRefreshInterval  = 3 * time.Second
+	gitRefreshTimeout   = 4 * time.Second
+	worktreeTimeout     = 30 * time.Second
+	splashFrameDelay    = 112 * time.Millisecond
+	splashFrameCount    = 8
+	streamWatchInterval = 1 * time.Second
+	streamStallTimeout  = 90 * time.Second
+	defaultScrollSpeed  = 3
+	minLayoutWidth      = 60
+	inputPrompt         = "> "
+	fastModeModel       = "gpt-5.1-codex-mini"
 )
 
 type overlayKind int
@@ -204,6 +206,9 @@ type model struct {
 	thinking                bool
 	thinkingEntryIndex      int
 	thinkingFrame           int
+	thinkingStartedAt       time.Time
+	streamStartedAt         time.Time
+	lastStreamEventAt       time.Time
 
 	currentModel string
 	currentMode  string
@@ -216,6 +221,8 @@ type splashTickMsg struct{}
 type gitTickMsg struct{}
 
 type thinkingTickMsg struct{}
+
+type streamWatchTickMsg struct{}
 
 type gitRefreshedMsg struct {
 	snapshot gitops.Snapshot
@@ -429,11 +436,15 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.streaming = true
 		m.streamBuffer = ""
 		m.streamingAssistantIndex = -1
+		now := time.Now()
+		m.streamStartedAt = now
+		m.lastStreamEventAt = now
 		m.appendActivity("system", "stream started", true)
 		m.setActiveAgentStatus(agent.StatusThinking)
 		m.startThinkingStatus()
-		return m, tea.Batch(waitForStreamEventCmd(m.streamCh), thinkingTickCmd())
+		return m, tea.Batch(waitForStreamEventCmd(m.streamCh), thinkingTickCmd(), streamWatchTickCmd())
 	case streamEventMsg:
+		m.lastStreamEventAt = time.Now()
 		if m.handleStreamEvent(typed.event) {
 			return m, waitForStreamEventCmd(m.streamCh)
 		}
@@ -443,6 +454,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.streamingAssistantIndex = -1
 		m.thinking = false
 		m.thinkingEntryIndex = -1
+		m.thinkingStartedAt = time.Time{}
+		m.streamStartedAt = time.Time{}
+		m.lastStreamEventAt = time.Time{}
 		return m, m.dequeueNextPromptCmd()
 	case streamEndedMsg:
 		m.streaming = false
@@ -451,6 +465,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.streamingAssistantIndex = -1
 		m.thinking = false
 		m.thinkingEntryIndex = -1
+		m.thinkingStartedAt = time.Time{}
+		m.streamStartedAt = time.Time{}
+		m.lastStreamEventAt = time.Time{}
 		m.setActiveAgentStatus(agent.StatusIdle)
 		m.appendActivity("system", "stream ended", true)
 		return m, m.dequeueNextPromptCmd()
@@ -460,6 +477,47 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.advanceThinkingStatus()
 		return m, thinkingTickCmd()
+	case streamWatchTickMsg:
+		if !m.streaming {
+			return m, nil
+		}
+
+		lastEventAt := m.lastStreamEventAt
+		if lastEventAt.IsZero() {
+			lastEventAt = m.streamStartedAt
+		}
+		if lastEventAt.IsZero() {
+			lastEventAt = time.Now()
+		}
+		silentFor := time.Since(lastEventAt)
+		if silentFor >= streamStallTimeout {
+			if m.cancelFn != nil {
+				m.cancelFn()
+			}
+			m.cancelFn = nil
+			m.streaming = false
+			m.streamCh = nil
+			m.streamingAssistantIndex = -1
+			m.thinking = false
+			m.thinkingEntryIndex = -1
+			m.thinkingStartedAt = time.Time{}
+			m.lastStreamEventAt = time.Time{}
+			m.streamBuffer = ""
+			for idx := range m.entries {
+				if m.entries[idx].Kind == threadTool && m.entries[idx].ToolStatus == "running" {
+					m.entries[idx].ToolStatus = "error"
+				}
+			}
+			m.runningToolByID = make(map[string]int)
+			m.setActiveAgentStatus(agent.StatusIdle)
+			elapsed := formatElapsedDuration(time.Since(m.streamStartedAt))
+			m.streamStartedAt = time.Time{}
+			m.appendActivity("error", "stream stalled and was canceled", false)
+			m.appendSystemEntry("stream stalled (no events for "+formatElapsedDuration(silentFor)+", total "+elapsed+"); canceled", true)
+			return m, m.dequeueNextPromptCmd()
+		}
+		m.refreshAgentsOverlayIfOpen()
+		return m, streamWatchTickCmd()
 	case shellResultMsg:
 		cmd := m.handleShellResult(typed)
 		return m, cmd
@@ -894,6 +952,9 @@ func (m *model) submitPrompt(prompt string, steer bool, mode composeMode) tea.Cm
 		m.thinking = false
 		m.thinkingEntryIndex = -1
 		m.thinkingFrame = 0
+		m.thinkingStartedAt = time.Time{}
+		m.streamStartedAt = time.Time{}
+		m.lastStreamEventAt = time.Time{}
 		m.streamBuffer = ""
 		m.setActiveAgentStatus(agent.StatusIdle)
 		m.appendActivity("system", "steer: interrupted current stream", true)
@@ -1199,7 +1260,17 @@ func (m *model) openAgentsOverlay() {
 			if snapshot.Active {
 				indicator = "●"
 			}
-			meta := strings.TrimSpace(renderAgentStatusBadge(snapshot.Status) + " · " + snapshot.BackendID)
+			statusBadge := renderAgentStatusBadge(snapshot.Status)
+			if snapshot.Active && m.streaming {
+				elapsed := formatElapsedDuration(time.Since(m.streamStartedAt))
+				switch snapshot.Status {
+				case agent.StatusThinking:
+					statusBadge = theme.ToolStatusRun.Render("◐ thinking" + strings.Repeat(".", (m.thinkingFrame%3)+1) + " " + elapsed)
+				case agent.StatusTool:
+					statusBadge = theme.ToolStatusRun.Render("◉ tool… " + elapsed)
+				}
+			}
+			meta := strings.TrimSpace(statusBadge + " · " + snapshot.BackendID)
 			items = append(items, overlayItem{
 				Title:       indicator + " " + snapshot.Name,
 				Description: snapshot.SessionName,
@@ -1679,6 +1750,7 @@ func (m *model) syncAgentsWithTasks() {
 			m.agentPool.SetActive(m.activeAgent)
 		}
 	}
+	m.refreshAgentsOverlayIfOpen()
 }
 
 func (m *model) setActiveAgentStatus(status agent.Status) {
@@ -1692,6 +1764,20 @@ func (m *model) setActiveAgentStatus(status agent.Status) {
 		return
 	}
 	m.agentPool.SetStatus(m.activeAgent, status)
+	m.refreshAgentsOverlayIfOpen()
+}
+
+func (m *model) refreshAgentsOverlayIfOpen() {
+	if m.overlay != overlayAgents {
+		return
+	}
+	current := m.overlayIndex
+	m.openAgentsOverlay()
+	if len(m.overlayItems) == 0 {
+		m.overlayIndex = 0
+		return
+	}
+	m.overlayIndex = clampInt(current, 0, len(m.overlayItems)-1)
 }
 
 func (m model) activeAgentSnapshot() (agent.Snapshot, bool) {
@@ -1737,13 +1823,10 @@ func (m *model) appendActivity(kind string, text string, success bool) {
 }
 
 func (m *model) startThinkingStatus() {
-	backendLabel := "backend"
-	if m.backendClient != nil {
-		backendLabel = strings.ToLower(strings.TrimSpace(m.backendClient.Label()))
-	}
+	m.thinkingStartedAt = time.Now()
 	entry := threadEntry{
 		Kind:      threadReasoning,
-		Text:      "connecting to " + backendLabel + "...",
+		Text:      m.renderThinkingStatusText(),
 		Timestamp: time.Now(),
 	}
 	m.entries = append(m.entries, entry)
@@ -1765,22 +1848,27 @@ func (m *model) setThinkingText(text string) {
 }
 
 func (m *model) advanceThinkingStatus() {
-	frames := []string{
-		"connecting to backend",
-		"connecting to backend.",
-		"connecting to backend..",
-		"connecting to backend...",
-		"thinking",
-		"thinking.",
-		"thinking..",
-		"thinking...",
-	}
-	if len(frames) == 0 {
-		return
-	}
-	text := frames[m.thinkingFrame%len(frames)]
 	m.thinkingFrame++
-	m.setThinkingText(text)
+	m.setThinkingText(m.renderThinkingStatusText())
+	m.refreshAgentsOverlayIfOpen()
+}
+
+func (m model) renderThinkingStatusText() string {
+	base := "thinking"
+	if m.backendClient != nil {
+		name := strings.ToLower(strings.TrimSpace(m.backendClient.Label()))
+		if name != "" {
+			base = "thinking via " + name
+		}
+	}
+
+	phase := m.thinkingFrame % 4
+	dots := strings.Repeat(".", phase+1)
+	elapsed := time.Since(m.thinkingStartedAt)
+	if m.thinkingStartedAt.IsZero() {
+		elapsed = 0
+	}
+	return fmt.Sprintf("%s%s (%s elapsed)", base, dots, formatElapsedDuration(elapsed))
 }
 
 func (m *model) handleStreamEvent(event backend.Event) bool {
@@ -1902,6 +1990,7 @@ func (m *model) handleStreamEvent(event backend.Event) bool {
 		}
 		m.thinkingEntryIndex = -1
 		m.thinkingFrame = 0
+		m.thinkingStartedAt = time.Time{}
 		for _, idx := range m.runningToolByID {
 			if idx >= 0 && idx < len(m.entries) {
 				if m.entries[idx].ToolStatus == "running" {
@@ -1932,6 +2021,7 @@ func (m *model) handleStreamEvent(event backend.Event) bool {
 		m.thinking = false
 		m.thinkingEntryIndex = -1
 		m.thinkingFrame = 0
+		m.thinkingStartedAt = time.Time{}
 		errText := typed.Err.Error()
 		m.appendSystemEntry("stream error: "+errText, true)
 		m.appendActivity("error", "stream error: "+errText, false)
@@ -2356,6 +2446,15 @@ func (m model) renderSidebar(width int, height int) string {
 			agentName = snapshot.ID
 		}
 		agentMode = agentStatusLabel(snapshot.Status)
+		if m.streaming && snapshot.Active {
+			elapsed := formatElapsedDuration(time.Since(m.streamStartedAt))
+			switch snapshot.Status {
+			case agent.StatusThinking:
+				agentMode = "thinking" + strings.Repeat(".", (m.thinkingFrame%3)+1) + " " + elapsed
+			case agent.StatusTool:
+				agentMode = "tool… " + elapsed
+			}
+		}
 	}
 	lines = append(lines, sidebarKeyValueRow("agent", agentName, innerWidth))
 	lines = append(lines, sidebarKeyValueRow("status", agentMode, innerWidth))
@@ -2688,6 +2787,12 @@ func gitTickCmd() tea.Cmd {
 func thinkingTickCmd() tea.Cmd {
 	return tea.Tick(220*time.Millisecond, func(time.Time) tea.Msg {
 		return thinkingTickMsg{}
+	})
+}
+
+func streamWatchTickCmd() tea.Cmd {
+	return tea.Tick(streamWatchInterval, func(time.Time) tea.Msg {
+		return streamWatchTickMsg{}
 	})
 }
 
@@ -3025,6 +3130,16 @@ func truncateWithEllipsis(value string, maxLen int) string {
 		return "…"
 	}
 	return ansi.Truncate(clean, maxLen-1, "") + "…"
+}
+
+func formatElapsedDuration(duration time.Duration) string {
+	if duration < 0 {
+		duration = 0
+	}
+	seconds := int(duration.Round(time.Second).Seconds())
+	minutes := seconds / 60
+	remainder := seconds % 60
+	return fmt.Sprintf("%02d:%02d", minutes, remainder)
 }
 
 func relativeTimeFromNow(t time.Time) string {
