@@ -1,0 +1,15 @@
+# Orb configuration example.
+# Save as ~/.config/orb/orb.toml or pass --config /path/to/orb.toml
+
+# Codex API key used when no CLI session auth is available.
+api_key = ""
+
+# Default model identifier for future Codex requests.
+model = "gpt-5.4"
+
+# Reasoning mode: fast|normal|high|max (mapped to low|medium|high|xhigh).
+reasoning_effort = "normal"
+
+[tui]
+# Scroll speed multiplier for ctrl+u / ctrl+d viewport movement.
+scroll_speed = 3

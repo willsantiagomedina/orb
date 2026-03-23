@@ -1,0 +1,39 @@
+<svg width="512" height="512" viewBox="0 0 512 512" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <clipPath id="clipSphere">
+      <circle cx="256" cy="256" r="184" />
+    </clipPath>
+
+    <radialGradient id="orbCore" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse"
+      gradientTransform="translate(230 214) rotate(90) scale(190)">
+      <stop offset="0" stop-color="#e0d9ff" />
+      <stop offset="0.05" stop-color="#9b59f5" />
+      <stop offset="0.24" stop-color="#7c3aed" />
+      <stop offset="0.52" stop-color="#4c2d96" />
+      <stop offset="0.78" stop-color="#1e1040" />
+      <stop offset="1" stop-color="#0f0f14" />
+    </radialGradient>
+
+    <radialGradient id="innerShadow" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse"
+      gradientTransform="translate(274 286) rotate(90) scale(170)">
+      <stop offset="0.58" stop-color="#0f0f14" stop-opacity="0" />
+      <stop offset="0.88" stop-color="#1e1040" stop-opacity="0.58" />
+      <stop offset="1" stop-color="#0a0a0e" stop-opacity="0.88" />
+    </radialGradient>
+
+    <radialGradient id="catchLight" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse"
+      gradientTransform="translate(192 168) rotate(90) scale(42 58)">
+      <stop offset="0" stop-color="#e0d9ff" stop-opacity="0.98" />
+      <stop offset="0.38" stop-color="#c4b5fd" stop-opacity="0.78" />
+      <stop offset="1" stop-color="#c4b5fd" stop-opacity="0" />
+    </radialGradient>
+  </defs>
+
+  <g clip-path="url(#clipSphere)">
+    <circle cx="256" cy="256" r="184" fill="url(#orbCore)"/>
+    <circle cx="256" cy="256" r="184" fill="url(#innerShadow)"/>
+    <ellipse cx="192" cy="168" rx="58" ry="42" fill="url(#catchLight)"/>
+  </g>
+
+  <circle cx="256" cy="256" r="184" stroke="#4c2d96" stroke-opacity="0.3" stroke-width="1.5"/>
+</svg>

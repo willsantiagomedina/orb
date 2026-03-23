@@ -1,0 +1,14 @@
+# macOS
+.DS_Store
+
+# Editor/IDE
+.vscode/
+.idea/
+
+# Build artifacts
+bin/
+*.test
+*.out
+
+# Local runtime state
+.orb/
