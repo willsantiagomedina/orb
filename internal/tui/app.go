@@ -1311,7 +1311,7 @@ func (m *model) openAgentsOverlay() {
 				elapsed := formatElapsedDuration(time.Since(m.streamStartedAt))
 				switch snapshot.Status {
 				case agent.StatusThinking:
-					statusBadge = theme.ToolStatusRun.Render("◐ thinking" + strings.Repeat(".", (m.thinkingFrame%3)+1) + " " + elapsed)
+					statusBadge = theme.ToolStatusRun.Render(orbThinkingStatus(m.thinkingFrame, elapsed))
 				case agent.StatusTool:
 					statusBadge = theme.ToolStatusRun.Render("◉ tool… " + elapsed)
 				}
@@ -1908,13 +1908,11 @@ func (m model) renderThinkingStatusText() string {
 		}
 	}
 
-	phase := m.thinkingFrame % 4
-	dots := strings.Repeat(".", phase+1)
 	elapsed := time.Since(m.thinkingStartedAt)
 	if m.thinkingStartedAt.IsZero() {
 		elapsed = 0
 	}
-	return fmt.Sprintf("%s%s (%s elapsed)", base, dots, formatElapsedDuration(elapsed))
+	return fmt.Sprintf("%s %s (%s elapsed)", orbDotsFrame(m.thinkingFrame), base, formatElapsedDuration(elapsed))
 }
 
 func (m *model) handleStreamEvent(event backend.Event) bool {
@@ -2496,7 +2494,7 @@ func (m model) renderSidebar(width int, height int) string {
 			elapsed := formatElapsedDuration(time.Since(m.streamStartedAt))
 			switch snapshot.Status {
 			case agent.StatusThinking:
-				agentMode = "thinking" + strings.Repeat(".", (m.thinkingFrame%3)+1) + " " + elapsed
+				agentMode = orbThinkingStatus(m.thinkingFrame, elapsed)
 			case agent.StatusTool:
 				agentMode = "tool… " + elapsed
 			}
@@ -3129,12 +3127,27 @@ func agentStatusLabel(status agent.Status) string {
 func renderAgentStatusBadge(status agent.Status) string {
 	switch status {
 	case agent.StatusThinking:
-		return theme.ToolStatusRun.Render("◐ thinking")
+		return theme.ToolStatusRun.Render("◉ ○ ○ thinking")
 	case agent.StatusTool:
 		return theme.ToolStatusRun.Render("◉ tool")
 	default:
 		return theme.ToolStatusDone.Render("○ idle")
 	}
+}
+
+func orbDotsFrame(frame int) string {
+	switch frame % 3 {
+	case 1:
+		return "○ ◉ ○"
+	case 2:
+		return "○ ○ ◉"
+	default:
+		return "◉ ○ ○"
+	}
+}
+
+func orbThinkingStatus(frame int, elapsed string) string {
+	return orbDotsFrame(frame) + " thinking " + elapsed
 }
 
 func clampPlainLines(lines []string, width int, height int) []string {
