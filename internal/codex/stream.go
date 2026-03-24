@@ -22,11 +22,17 @@ import (
 const chatCompletionsEndpoint = "https://api.openai.com/v1/chat/completions"
 const codexExecTimeout = 120 * time.Second
 
+const (
+	ExecutionModeUnblocked = "unblocked"
+	ExecutionModeSandboxed = "sandboxed"
+)
+
 var (
-	modelOverrideMu sync.RWMutex
-	modelOverride   string
-	effortOverride  string
-	cwdOverride     string
+	modelOverrideMu  sync.RWMutex
+	modelOverride    string
+	effortOverride   string
+	cwdOverride      string
+	execModeOverride string
 )
 
 // Message is a chat message sent to the Codex streaming endpoint.
@@ -185,6 +191,13 @@ func SetRuntimeWorkingDir(path string) {
 	modelOverrideMu.Unlock()
 }
 
+// SetRuntimeExecutionMode sets the in-memory Codex execution mode override.
+func SetRuntimeExecutionMode(mode string) {
+	modelOverrideMu.Lock()
+	defer modelOverrideMu.Unlock()
+	execModeOverride = normalizeExecutionMode(mode)
+}
+
 // CurrentModel resolves the model currently used by Orb streams.
 func CurrentModel() (string, error) {
 	return resolveModelName()
@@ -193,6 +206,11 @@ func CurrentModel() (string, error) {
 // CurrentReasoningEffort resolves the reasoning effort currently used by Orb streams.
 func CurrentReasoningEffort() (string, error) {
 	return resolveReasoningEffort()
+}
+
+// CurrentExecutionMode resolves the Codex execution mode currently used by Orb streams.
+func CurrentExecutionMode() (string, error) {
+	return resolveExecutionMode()
 }
 
 // Stream connects to the OpenAI chat completions SSE stream and returns typed events.
@@ -208,6 +226,11 @@ func Stream(ctx context.Context, messages []Message, toolDefs []ToolDefinition) 
 			return
 		}
 		reasoningEffort, err := resolveReasoningEffort()
+		if err != nil {
+			emitEvent(ctx, events, ErrorEvent{Err: err})
+			return
+		}
+		executionMode, err := resolveExecutionMode()
 		if err != nil {
 			emitEvent(ctx, events, ErrorEvent{Err: err})
 			return
@@ -229,7 +252,7 @@ func Stream(ctx context.Context, messages []Message, toolDefs []ToolDefinition) 
 		attemptErrors := make([]string, 0, len(credentials)+1)
 
 		if shouldUseCodexCLI() {
-			err = streamWithCodexCLI(ctx, modelName, reasoningEffort, messages, events)
+			err = streamWithCodexCLI(ctx, modelName, reasoningEffort, executionMode, messages, events)
 			if err == nil {
 				return
 			}
@@ -366,6 +389,7 @@ func streamWithCodexCLI(
 	ctx context.Context,
 	modelName string,
 	reasoningEffort string,
+	executionMode string,
 	messages []Message,
 	events chan<- Event,
 ) error {
@@ -391,9 +415,13 @@ func streamWithCodexCLI(
 		"--skip-git-repo-check",
 		"--json",
 		"--ephemeral",
-		"--dangerously-bypass-approvals-and-sandbox",
 		"--color",
 		"never",
+	}
+	if normalizeExecutionMode(executionMode) == ExecutionModeUnblocked {
+		args = append(args, "--dangerously-bypass-approvals-and-sandbox")
+	} else {
+		args = append(args, "--full-auto", "--sandbox", "workspace-write")
 	}
 	if workingDir := runtimeWorkingDir(); workingDir != "" {
 		args = append(args, "--cd", workingDir)
@@ -797,6 +825,25 @@ func resolveReasoningEffort() (string, error) {
 	return "medium", nil
 }
 
+func resolveExecutionMode() (string, error) {
+	modelOverrideMu.RLock()
+	rawOverride := strings.TrimSpace(execModeOverride)
+	modelOverrideMu.RUnlock()
+	if rawOverride != "" {
+		return normalizeExecutionMode(rawOverride), nil
+	}
+
+	cfg, err := config.Load(configPathOrDefault(""))
+	if err != nil {
+		return "", fmt.Errorf("load orb config for execution mode resolution: %w", err)
+	}
+	mode := normalizeExecutionMode(cfg.Codex.ExecutionMode)
+	if mode == "" {
+		return ExecutionModeUnblocked, nil
+	}
+	return mode, nil
+}
+
 func normalizeReasoningEffort(value string) string {
 	switch strings.ToLower(strings.TrimSpace(value)) {
 	case "low", "fast":
@@ -809,6 +856,17 @@ func normalizeReasoningEffort(value string) string {
 		return "xhigh"
 	default:
 		return ""
+	}
+}
+
+func normalizeExecutionMode(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case ExecutionModeSandboxed:
+		return ExecutionModeSandboxed
+	case ExecutionModeUnblocked:
+		return ExecutionModeUnblocked
+	default:
+		return ExecutionModeUnblocked
 	}
 }
 

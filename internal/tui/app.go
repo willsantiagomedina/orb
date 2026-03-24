@@ -20,6 +20,7 @@ import (
 	"github.com/charmbracelet/x/ansi"
 	"github.com/willdev/orb/internal/agent"
 	"github.com/willdev/orb/internal/backend"
+	"github.com/willdev/orb/internal/codex"
 	"github.com/willdev/orb/internal/config"
 	"github.com/willdev/orb/internal/gitops"
 	"github.com/willdev/orb/internal/store"
@@ -84,6 +85,8 @@ const (
 	actionExport
 	actionSteer
 	actionFast
+	actionUnblocked
+	actionSandboxed
 	actionHelp
 	actionExit
 	actionOpenEditor
@@ -220,6 +223,7 @@ type model struct {
 	activeAgent  string
 
 	showThinkingDetails bool
+	executionMode       string
 }
 
 type splashTickMsg struct{}
@@ -350,6 +354,7 @@ func New(
 		currentMode:             "medium",
 		composeMode:             composeModeAgent,
 		showThinkingDetails:     false,
+		executionMode:           codex.ExecutionModeUnblocked,
 	}
 	m.applyComposeMode()
 	if err := m.loadBackendFromConfig(); err != nil {
@@ -1071,6 +1076,19 @@ func (m *model) switchBackend(id backend.ID, persist bool) error {
 		reasoningEffort = "medium"
 	}
 	m.currentMode = reasoningEffort
+	if selected == backend.CodexID {
+		mode, modeErr := codex.CurrentExecutionMode()
+		if modeErr != nil {
+			m.appendActivity("error", "execution mode resolution failed: "+modeErr.Error(), false)
+			mode = codex.ExecutionModeUnblocked
+		}
+		m.executionMode = strings.TrimSpace(mode)
+		if m.executionMode == "" {
+			m.executionMode = codex.ExecutionModeUnblocked
+		}
+	} else {
+		m.executionMode = "managed"
+	}
 	m.syncAgentsWithTasks()
 	if strings.TrimSpace(m.activeAgent) != "" && m.agentPool != nil {
 		m.agentPool.SetBackend(m.activeAgent, string(selected))
@@ -1271,6 +1289,32 @@ func (m *model) executeCommandAction(action slashAction) tea.Cmd {
 		m.currentMode = "low"
 		m.appendActivity("system", "fast mode enabled", true)
 		m.appendSystemEntry("fast mode enabled ("+targetModel+" + low reasoning)", false)
+	case actionUnblocked:
+		if m.backendID != backend.CodexID {
+			m.appendSystemEntry("unblocked mode is only available on codex backend", true)
+			return nil
+		}
+		codex.SetRuntimeExecutionMode(codex.ExecutionModeUnblocked)
+		m.executionMode = codex.ExecutionModeUnblocked
+		if err := config.SetExecutionMode(m.configPath, codex.ExecutionModeUnblocked); err != nil {
+			m.appendSystemEntry("set unblocked mode failed: "+err.Error(), true)
+			return nil
+		}
+		m.appendActivity("system", "execution mode: unblocked", true)
+		m.appendSystemEntry("execution mode set to unblocked", false)
+	case actionSandboxed:
+		if m.backendID != backend.CodexID {
+			m.appendSystemEntry("sandboxed mode is only available on codex backend", true)
+			return nil
+		}
+		codex.SetRuntimeExecutionMode(codex.ExecutionModeSandboxed)
+		m.executionMode = codex.ExecutionModeSandboxed
+		if err := config.SetExecutionMode(m.configPath, codex.ExecutionModeSandboxed); err != nil {
+			m.appendSystemEntry("set sandboxed mode failed: "+err.Error(), true)
+			return nil
+		}
+		m.appendActivity("system", "execution mode: sandboxed", true)
+		m.appendSystemEntry("execution mode set to sandboxed", false)
 	case actionHelp:
 		m.openHelpOverlay()
 	case actionExit:
@@ -2343,6 +2387,7 @@ func (m model) renderHeader() string {
 		theme.HeaderModel.Render("backend:" + string(m.backendID)),
 		theme.HeaderModel.Render(m.currentModel),
 		theme.HeaderModel.Render("mode:" + displayModeLabel(m.currentModel, m.currentMode)),
+		theme.HeaderModel.Render("exec:" + m.executionMode),
 		theme.HeaderModel.Render("input:" + composeModeLabel(m.composeMode)),
 		theme.HeaderBranch.Render("⎇ " + strings.TrimSpace(m.branch)),
 	}
@@ -3416,6 +3461,8 @@ func defaultSlashCommands() []slashCommand {
 		{Command: "/export", Description: "Export session to markdown", Keybind: "ctrl+x x", Action: actionExport},
 		{Command: "/steer", Description: "Interrupt current stream and steer", Keybind: "/steer <msg>", Action: actionSteer},
 		{Command: "/fast", Description: "Enable fast profile", Keybind: "quick mode", Action: actionFast},
+		{Command: "/unblocked", Description: "Set codex execution mode to unblocked", Keybind: "full access", Action: actionUnblocked},
+		{Command: "/sandboxed", Description: "Set codex execution mode to sandboxed", Keybind: "workspace-write", Action: actionSandboxed},
 		{Command: "/help", Description: "Show help overlay", Keybind: "cmd+?", Action: actionHelp},
 		{Command: "/exit", Description: "Quit Orb", Keybind: "ctrl+x q", Action: actionExit},
 	}

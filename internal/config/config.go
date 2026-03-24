@@ -21,7 +21,8 @@ type Config struct {
 
 // Codex stores backend-related runtime selection.
 type Codex struct {
-	Backend string `toml:"backend"`
+	Backend       string `toml:"backend"`
+	ExecutionMode string `toml:"execution_mode"`
 }
 
 // TUI contains terminal UI specific settings.
@@ -68,6 +69,7 @@ func Load(path string) (Config, error) {
 	cfg.Model = strings.TrimSpace(cfg.Model)
 	cfg.ReasoningEffort = strings.TrimSpace(cfg.ReasoningEffort)
 	cfg.Codex.Backend = normalizeBackendID(cfg.Codex.Backend)
+	cfg.Codex.ExecutionMode = normalizeExecutionMode(cfg.Codex.ExecutionMode)
 	if cfg.TUI.ScrollSpeed <= 0 {
 		cfg.TUI.ScrollSpeed = 3
 	}
@@ -88,6 +90,7 @@ func Save(path string, cfg Config) error {
 	cfg.Model = strings.TrimSpace(cfg.Model)
 	cfg.ReasoningEffort = strings.TrimSpace(cfg.ReasoningEffort)
 	cfg.Codex.Backend = normalizeBackendID(cfg.Codex.Backend)
+	cfg.Codex.ExecutionMode = normalizeExecutionMode(cfg.Codex.ExecutionMode)
 	if cfg.TUI.ScrollSpeed <= 0 {
 		cfg.TUI.ScrollSpeed = 3
 	}
@@ -119,6 +122,19 @@ func SetBackend(path string, backend string) error {
 	return nil
 }
 
+// SetExecutionMode updates the configured Codex execution mode and persists orb.toml.
+func SetExecutionMode(path string, mode string) error {
+	cfg, err := Load(path)
+	if err != nil {
+		return fmt.Errorf("load config to set execution mode: %w", err)
+	}
+	cfg.Codex.ExecutionMode = normalizeExecutionMode(mode)
+	if err := Save(path, cfg); err != nil {
+		return fmt.Errorf("save execution mode: %w", err)
+	}
+	return nil
+}
+
 func resolvePath(path string) (string, error) {
 	cleanPath := strings.TrimSpace(path)
 	if cleanPath != "" {
@@ -139,5 +155,14 @@ func normalizeBackendID(value string) string {
 		return "claude"
 	default:
 		return "codex"
+	}
+}
+
+func normalizeExecutionMode(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "sandboxed":
+		return "sandboxed"
+	default:
+		return "unblocked"
 	}
 }

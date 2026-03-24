@@ -14,6 +14,9 @@ reasoning_effort = "normal"
 # Active backend runtime: codex or claude.
 backend = "codex"
 
+# Codex execution mode: unblocked (bypass approvals/sandbox) or sandboxed.
+execution_mode = "unblocked"
+
 [tui]
 # Scroll speed multiplier for ctrl+u / ctrl+d viewport movement.
 scroll_speed = 3
