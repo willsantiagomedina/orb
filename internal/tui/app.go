@@ -2039,7 +2039,8 @@ func (m *model) handleStreamEvent(event backend.Event) bool {
 		} else if m.streamingAssistantIndex < len(m.entries) {
 			m.entries[m.streamingAssistantIndex].Text += token
 		}
-		m.refreshViewport(true)
+		m.refreshViewport(false)
+		m.followAssistantResponse()
 		return true
 	case backend.ToolCallEvent:
 		name := strings.TrimSpace(typed.Name)
@@ -2101,7 +2102,7 @@ func (m *model) handleStreamEvent(event backend.Event) bool {
 					m.setActiveAgentStatus(agent.StatusThinking)
 				}
 			}
-			m.refreshViewport(true)
+			m.refreshViewport(false)
 			return true
 		}
 
@@ -2123,7 +2124,7 @@ func (m *model) handleStreamEvent(event backend.Event) bool {
 			ToolStatus: status,
 			Timestamp:  time.Now(),
 		})
-		m.refreshViewport(true)
+		m.refreshViewport(false)
 		m.appendActivity("tool", baseName+" "+status, status != "error")
 		return true
 	case backend.DoneEvent:
@@ -2155,7 +2156,12 @@ func (m *model) handleStreamEvent(event backend.Event) bool {
 		}
 		m.streamBuffer = ""
 		m.appendActivity("system", "stream complete", true)
-		m.refreshViewport(true)
+		if m.streamingAssistantIndex >= 0 {
+			m.refreshViewport(false)
+			m.followAssistantResponse()
+		} else {
+			m.refreshViewport(true)
+		}
 		return false
 	case backend.ErrorEvent:
 		m.setActiveAgentStatus(agent.StatusIdle)
@@ -2177,7 +2183,7 @@ func (m *model) handleStreamEvent(event backend.Event) bool {
 			}
 		}
 		m.runningToolByID = make(map[string]int)
-		m.refreshViewport(true)
+		m.refreshViewport(false)
 		return false
 	default:
 		m.appendActivity("system", "unknown stream event", false)
@@ -2225,7 +2231,7 @@ func (m *model) handleShellResult(result shellResultMsg) tea.Cmd {
 	if !m.streaming {
 		m.setActiveAgentStatus(agent.StatusIdle)
 	}
-	m.refreshViewport(true)
+	m.refreshViewport(false)
 	if !result.assist {
 		return nil
 	}
@@ -2329,6 +2335,42 @@ func (m *model) refreshViewport(follow bool) {
 	if follow && m.sticky {
 		m.viewport.GotoBottom()
 	}
+}
+
+func (m *model) followAssistantResponse() {
+	if !m.sticky {
+		return
+	}
+	if m.viewport.Width <= 0 || m.viewport.Height <= 0 {
+		return
+	}
+	if m.streamingAssistantIndex < 0 || m.streamingAssistantIndex >= len(m.entries) {
+		m.viewport.GotoBottom()
+		return
+	}
+
+	topLine := m.threadEntryStartLine(m.streamingAssistantIndex, m.viewport.Width)
+	if topLine < 0 {
+		m.viewport.GotoBottom()
+		return
+	}
+
+	anchor := maxInt(0, topLine-maxInt(0, m.viewport.Height/3))
+	m.viewport.SetYOffset(anchor)
+}
+
+func (m model) threadEntryStartLine(target int, width int) int {
+	if target < 0 || target >= len(m.entries) {
+		return -1
+	}
+
+	total := 0
+	for idx := 0; idx < target; idx++ {
+		rendered := m.renderThreadEntry(idx, m.entries[idx], width)
+		total += lipgloss.Height(rendered)
+		total += 2
+	}
+	return total
 }
 
 func (m model) renderThreadContent(width int) string {
