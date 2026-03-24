@@ -228,7 +228,7 @@ func Stream(ctx context.Context, messages []Message, toolDefs []ToolDefinition) 
 
 		attemptErrors := make([]string, 0, len(credentials)+1)
 
-		if shouldUseCodexCLI() && !hasAPIKeyCredential {
+		if shouldUseCodexCLI() {
 			err = streamWithCodexCLI(ctx, modelName, reasoningEffort, messages, events)
 			if err == nil {
 				return
@@ -393,6 +393,8 @@ func streamWithCodexCLI(
 		"--ephemeral",
 		"--color",
 		"never",
+		"--sandbox",
+		"workspace-write",
 	}
 	trimmedModel := strings.TrimSpace(modelName)
 	if trimmedModel != "" {

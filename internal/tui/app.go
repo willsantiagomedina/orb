@@ -36,6 +36,7 @@ const (
 	streamWatchInterval = 1 * time.Second
 	streamStallTimeout  = 90 * time.Second
 	defaultScrollSpeed  = 3
+	maxStreamHistoryMsg = 48
 	minLayoutWidth      = 60
 	inputPrompt         = "> "
 	fastModeModel       = "gpt-5.1-codex-mini"
@@ -2766,10 +2767,16 @@ func (m *model) startStreamCmd(prompt string) tea.Cmd {
 	}
 	m.streamSeq++
 	streamID := m.streamSeq
-	return startBackendStreamCmd(streamID, m.backendClient, prompt, m.currentGitPath())
+	messages := m.buildStreamMessages(prompt)
+	return startBackendStreamCmd(streamID, m.backendClient, messages, m.currentGitPath())
 }
 
-func startBackendStreamCmd(streamID int, activeBackend backend.Backend, prompt string, cwd string) tea.Cmd {
+func startBackendStreamCmd(
+	streamID int,
+	activeBackend backend.Backend,
+	messages []backend.Message,
+	cwd string,
+) tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithCancel(context.Background())
 		activeBackend.SetRuntimeWorkingDir(cwd)
@@ -2784,19 +2791,105 @@ func startBackendStreamCmd(streamID int, activeBackend backend.Backend, prompt s
 				},
 			},
 		}
-		messages := []backend.Message{
-			{
-				Role:    "system",
-				Content: "You are Orb, a concise software engineering agent.",
-			},
-			{
-				Role:    "user",
-				Content: prompt,
-			},
-		}
 		stream := activeBackend.Stream(ctx, messages, tools)
 		return streamStartedMsg{streamID: streamID, stream: stream, cancel: cancel}
 	}
+}
+
+func (m model) buildStreamMessages(prompt string) []backend.Message {
+	cleanPrompt := strings.TrimSpace(prompt)
+	history := make([]backend.Message, 0, len(m.entries)+2)
+
+	for _, entry := range m.entries {
+		switch entry.Kind {
+		case threadUser:
+			text := strings.TrimSpace(entry.Text)
+			if text != "" {
+				history = append(history, backend.Message{Role: "user", Content: text})
+			}
+		case threadAssistant:
+			text := strings.TrimSpace(entry.Text)
+			if text != "" {
+				history = append(history, backend.Message{Role: "assistant", Content: text})
+			}
+		case threadSystem:
+			text := strings.TrimSpace(entry.Text)
+			if text != "" {
+				history = append(history, backend.Message{Role: "system", Content: "Orb event: " + text})
+			}
+		case threadTool:
+			toolName := strings.TrimSpace(entry.ToolName)
+			if toolName == "" {
+				toolName = "tool"
+			}
+			toolArgs := truncateWithEllipsis(strings.TrimSpace(entry.ToolArgs), 240)
+			toolResult := truncateWithEllipsis(strings.TrimSpace(entry.ToolResult), 360)
+			parts := []string{
+				fmt.Sprintf("Tool %s status=%s", toolName, strings.TrimSpace(entry.ToolStatus)),
+			}
+			if toolArgs != "" {
+				parts = append(parts, "args="+toolArgs)
+			}
+			if toolResult != "" {
+				parts = append(parts, "result="+toolResult)
+			}
+			history = append(history, backend.Message{Role: "system", Content: strings.Join(parts, " | ")})
+		case threadReasoning:
+			// Skip transient thinking lines from prompt history.
+		}
+	}
+
+	if cleanPrompt != "" && len(history) > 0 {
+		last := history[len(history)-1]
+		if last.Role == "user" && strings.TrimSpace(last.Content) == cleanPrompt {
+			history = history[:len(history)-1]
+		}
+	}
+
+	if len(history) > maxStreamHistoryMsg {
+		history = history[len(history)-maxStreamHistoryMsg:]
+	}
+
+	messages := make([]backend.Message, 0, len(history)+2)
+	messages = append(messages, backend.Message{
+		Role:    "system",
+		Content: m.streamSystemPrompt(),
+	})
+	messages = append(messages, history...)
+	if cleanPrompt != "" {
+		messages = append(messages, backend.Message{
+			Role:    "user",
+			Content: cleanPrompt,
+		})
+	}
+
+	return messages
+}
+
+func (m model) streamSystemPrompt() string {
+	taskName := strings.TrimSpace(m.currentTaskName())
+	if taskName == "" {
+		taskName = "unnamed session"
+	}
+	workspace := strings.TrimSpace(m.currentGitPath())
+	if workspace == "" {
+		workspace = strings.TrimSpace(m.repoBase)
+	}
+	branch := strings.TrimSpace(m.branch)
+	if branch == "" {
+		branch = "n/a"
+	}
+
+	lines := []string{
+		"You are Orb, a terminal-native software engineering agent.",
+		"Use the provided session history as authoritative context and continue the same task.",
+		"Treat this environment as writable; do not claim read-only access unless a command or tool error explicitly proves it.",
+		fmt.Sprintf("Current task: %s", taskName),
+		fmt.Sprintf("Workspace path: %s", workspace),
+		fmt.Sprintf("Git branch: %s", branch),
+		fmt.Sprintf("Compose mode: %s", composeModeLabel(m.composeMode)),
+	}
+	return strings.Join(lines, "\n")
 }
 
 func waitForStreamEventCmd(stream <-chan backend.Event, streamID int) tea.Cmd {
