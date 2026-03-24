@@ -78,6 +78,7 @@ const (
 	actionGit
 	actionLog
 	actionModels
+	actionThinking
 	actionWorktree
 	actionCompact
 	actionExport
@@ -217,6 +218,8 @@ type model struct {
 	currentMode  string
 	composeMode  composeMode
 	activeAgent  string
+
+	showThinkingDetails bool
 }
 
 type splashTickMsg struct{}
@@ -346,6 +349,7 @@ func New(
 		currentModel:            "gpt-5.4",
 		currentMode:             "medium",
 		composeMode:             composeModeAgent,
+		showThinkingDetails:     false,
 	}
 	m.applyComposeMode()
 	if err := m.loadBackendFromConfig(); err != nil {
@@ -719,6 +723,9 @@ func (m *model) handleLeaderKey(msg tea.KeyMsg) (tea.Cmd, bool) {
 	}
 	if key.Matches(msg, m.keys.ModelSwitch) {
 		return m.executeCommandAction(actionModels), false
+	}
+	if key.Matches(msg, m.keys.Thinking) {
+		return m.executeCommandAction(actionThinking), false
 	}
 	if key.Matches(msg, m.keys.Worktree) {
 		return m.executeCommandAction(actionWorktree), false
@@ -1216,6 +1223,14 @@ func (m *model) executeCommandAction(action slashAction) tea.Cmd {
 		m.openActivityOverlay()
 	case actionModels:
 		m.openModelsOverlay()
+	case actionThinking:
+		m.showThinkingDetails = !m.showThinkingDetails
+		if m.showThinkingDetails {
+			m.appendActivity("system", "thinking details expanded", true)
+		} else {
+			m.appendActivity("system", "thinking details collapsed", true)
+		}
+		m.refreshViewport(false)
 	case actionWorktree:
 		if err := m.createWorktreeForCurrentTask(); err != nil {
 			m.appendSystemEntry("worktree error: "+err.Error(), true)
@@ -2235,13 +2250,13 @@ func (m model) renderThreadContent(width int) string {
 	}
 
 	rendered := make([]string, 0, len(m.entries))
-	for _, entry := range m.entries {
-		rendered = append(rendered, m.renderThreadEntry(entry, width))
+	for idx, entry := range m.entries {
+		rendered = append(rendered, m.renderThreadEntry(idx, entry, width))
 	}
 	return strings.Join(rendered, "\n\n")
 }
 
-func (m model) renderThreadEntry(entry threadEntry, width int) string {
+func (m model) renderThreadEntry(index int, entry threadEntry, width int) string {
 	safeWidth := maxInt(24, width-2)
 	timestamp := entry.Timestamp.Local().Format("15:04")
 
@@ -2292,6 +2307,18 @@ func (m model) renderThreadEntry(entry threadEntry, width int) string {
 		box := theme.ToolCallBox.Copy().Width(inner).Render(strings.Join(parts, "\n"))
 		return indentLines(box, "  ")
 	case threadReasoning:
+		if !m.showThinkingDetails {
+			elapsed := extractThinkingElapsed(entry.Text)
+			if elapsed == "" && index == m.thinkingEntryIndex && m.streaming {
+				elapsed = formatElapsedDuration(time.Since(m.thinkingStartedAt))
+			}
+			line := orbDotsFrame(m.thinkingFrame) + " thinking"
+			if elapsed != "" {
+				line += " " + elapsed
+			}
+			collapsed := theme.ReasoningHead.Render(line) + " " + theme.FooterMuted.Render("(/thinking expand)")
+			return indentLines(collapsed, "  ")
+		}
 		rule := theme.ReasoningRule.Render(strings.Repeat("╌", maxInt(8, safeWidth-2)))
 		head := theme.ReasoningHead.Render("╌╌ thinking " + strings.Repeat("╌", maxInt(4, safeWidth-14)))
 		body := theme.ReasoningBody.Copy().Width(maxInt(20, safeWidth-2)).Render(strings.TrimSpace(entry.Text))
@@ -2881,6 +2908,8 @@ func (m model) streamSystemPrompt() string {
 		"You are Orb, a terminal-native software engineering agent.",
 		"Use the provided session history as authoritative context and continue the same task.",
 		"Treat this environment as writable; do not claim read-only access unless a command or tool error explicitly proves it.",
+		"Do not output hidden reasoning, chain-of-thought, or internal planning.",
+		"Keep responses user-facing and concise: state actions, results, and next steps only.",
 		fmt.Sprintf("Current task: %s", taskName),
 		fmt.Sprintf("Workspace path: %s", workspace),
 		fmt.Sprintf("Git branch: %s", branch),
@@ -3240,6 +3269,19 @@ func orbThinkingStatus(frame int, elapsed string) string {
 	return orbDotsFrame(frame) + " thinking " + elapsed
 }
 
+func extractThinkingElapsed(text string) string {
+	clean := strings.TrimSpace(text)
+	if clean == "" {
+		return ""
+	}
+	start := strings.LastIndex(clean, "(")
+	end := strings.LastIndex(clean, " elapsed)")
+	if start < 0 || end < 0 || end <= start+1 {
+		return ""
+	}
+	return strings.TrimSpace(clean[start+1 : end])
+}
+
 func clampPlainLines(lines []string, width int, height int) []string {
 	if width <= 0 || height <= 0 {
 		return []string{}
@@ -3367,6 +3409,7 @@ func defaultSlashCommands() []slashCommand {
 		{Command: "/git", Description: "Open git status overlay", Keybind: "ctrl+x g", Action: actionGit},
 		{Command: "/log", Description: "Open activity log overlay", Keybind: "ctrl+x l", Action: actionLog},
 		{Command: "/models", Description: "Switch backend, model, and mode", Keybind: "ctrl+x m", Action: actionModels},
+		{Command: "/thinking", Description: "Toggle thinking details", Keybind: "ctrl+x t", Action: actionThinking},
 		{Command: "/mode", Description: "Switch low/medium/high/xhigh", Keybind: "ctrl+x m", Action: actionModels},
 		{Command: "/worktree", Description: "Create git worktree for task", Keybind: "ctrl+x w", Action: actionWorktree},
 		{Command: "/compact", Description: "Summarize and compact session", Keybind: "ctrl+x c", Action: actionCompact},

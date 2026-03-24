@@ -391,11 +391,9 @@ func streamWithCodexCLI(
 		"--skip-git-repo-check",
 		"--json",
 		"--ephemeral",
-		"--full-auto",
+		"--dangerously-bypass-approvals-and-sandbox",
 		"--color",
 		"never",
-		"--sandbox",
-		"workspace-write",
 	}
 	if workingDir := runtimeWorkingDir(); workingDir != "" {
 		args = append(args, "--cd", workingDir)

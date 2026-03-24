@@ -12,6 +12,7 @@ type KeyMap struct {
 	Git         key.Binding
 	Log         key.Binding
 	ModelSwitch key.Binding
+	Thinking    key.Binding
 	Worktree    key.Binding
 	Compact     key.Binding
 	Export      key.Binding
@@ -62,6 +63,10 @@ func Default() KeyMap {
 		ModelSwitch: key.NewBinding(
 			key.WithKeys("m"),
 			key.WithHelp("ctrl+x m", "switch model"),
+		),
+		Thinking: key.NewBinding(
+			key.WithKeys("t"),
+			key.WithHelp("ctrl+x t", "toggle thinking"),
 		),
 		Worktree: key.NewBinding(
 			key.WithKeys("w"),
@@ -123,7 +128,7 @@ func (k KeyMap) FullHelp() [][]key.Binding {
 	return [][]key.Binding{
 		{k.Leader, k.CommandPalette, k.Help, k.Quit},
 		{k.NewSession, k.Agents, k.Sessions, k.Diff, k.Git, k.Log},
-		{k.ModelSwitch, k.Worktree, k.Compact, k.Export, k.OpenEditor},
+		{k.ModelSwitch, k.Thinking, k.Worktree, k.Compact, k.Export, k.OpenEditor},
 		{k.ComposeMode, k.ScrollBottom, k.ScrollUpHalf, k.ScrollDownHalf, k.Send, k.Dismiss},
 	}
 }
