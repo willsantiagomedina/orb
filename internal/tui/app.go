@@ -590,6 +590,10 @@ func (m model) View() string {
 }
 
 func (m *model) handleKey(msg tea.KeyMsg) (tea.Cmd, bool) {
+	if isMouseEscapeSequenceKey(msg) {
+		return nil, false
+	}
+
 	if msg.String() == "ctrl+c" {
 		return nil, true
 	}
@@ -711,6 +715,10 @@ func (m *model) handleMouse(msg tea.MouseMsg) tea.Cmd {
 		return m.handleOverlayMouse(msg)
 	}
 
+	if m.mouseInInputField(msg) {
+		return m.handleInputMouse(msg)
+	}
+
 	switch msg.Button { //nolint:exhaustive
 	case tea.MouseButtonWheelUp:
 		step := maxInt(1, m.scrollSpeed)
@@ -725,6 +733,55 @@ func (m *model) handleMouse(msg tea.MouseMsg) tea.Cmd {
 	}
 
 	return nil
+}
+
+func (m *model) handleInputMouse(msg tea.MouseMsg) tea.Cmd {
+	step := maxInt(1, m.scrollSpeed)
+
+	switch msg.Button { //nolint:exhaustive
+	case tea.MouseButtonWheelUp:
+		for i := 0; i < step; i++ {
+			m.input.CursorUp()
+		}
+	case tea.MouseButtonWheelDown:
+		for i := 0; i < step; i++ {
+			m.input.CursorDown()
+		}
+	}
+
+	return nil
+}
+
+func (m *model) mouseInInputField(msg tea.MouseMsg) bool {
+	x, y, width, height := m.inputFieldBounds()
+	if width <= 0 || height <= 0 {
+		return false
+	}
+	return msg.X >= x && msg.X < x+width && msg.Y >= y && msg.Y < y+height
+}
+
+func (m *model) inputFieldBounds() (int, int, int, int) {
+	availableWidth := maxInt(minLayoutWidth, m.width)
+	boxWidth := maxInt(20, availableWidth-4)
+
+	inputBoxStyle := theme.InputBoxFocused
+	if m.overlay != overlayNone {
+		inputBoxStyle = theme.InputBoxBlurred
+	}
+
+	headerHeight := maxInt(1, lipgloss.Height(m.renderHeader()))
+	inputBarHeight := maxInt(1, lipgloss.Height(m.renderInputBar()))
+	layout := computeZoneLayout(m.width, m.height, headerHeight, inputBarHeight)
+
+	slashHeight := 0
+	if m.showSlashMenu {
+		slashHeight = lipgloss.Height(indentLines(m.renderSlashMenu(boxWidth), "  "))
+	}
+
+	fieldHeight := lipgloss.Height(inputBoxStyle.Copy().Width(boxWidth).Render(m.input.View()))
+	x := 2
+	y := layout.HeaderHeight + layout.ContentHeight + theme.InputBar.GetVerticalFrameSize() + slashHeight
+	return x, y, boxWidth, fieldHeight
 }
 
 func (m *model) handleLeaderKey(msg tea.KeyMsg) (tea.Cmd, bool) {
@@ -790,6 +847,29 @@ func (m *model) handleOverlayMouse(msg tea.MouseMsg) tea.Cmd {
 	}
 
 	return nil
+}
+
+func isMouseEscapeSequenceKey(msg tea.KeyMsg) bool {
+	if len(msg.Runes) == 0 {
+		return false
+	}
+	raw := string(msg.Runes)
+	if strings.ContainsRune(raw, '\x1b') {
+		return true
+	}
+
+	// Some terminals can leak wheel CSI fragments as runes while the mouse is
+	// active; ignore those so they don't get inserted into the textarea.
+	if strings.HasPrefix(raw, "[<") && strings.Contains(raw, ";") {
+		return strings.HasSuffix(raw, "M") || strings.HasSuffix(raw, "m")
+	}
+	if strings.HasPrefix(raw, "<") && strings.Contains(raw, ";") {
+		return strings.HasSuffix(raw, "M") || strings.HasSuffix(raw, "m")
+	}
+	if strings.HasPrefix(raw, "[M") {
+		return true
+	}
+	return false
 }
 
 func (m *model) handleOverlayKey(msg tea.KeyMsg) (tea.Cmd, bool) {
