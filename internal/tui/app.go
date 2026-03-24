@@ -35,9 +35,9 @@ const (
 	splashFrameDelay    = 112 * time.Millisecond
 	splashFrameCount    = 8
 	streamWatchInterval = 1 * time.Second
-	streamStallTimeout  = 90 * time.Second
+	streamStallTimeout  = 6 * time.Minute
 	defaultScrollSpeed  = 3
-	maxStreamHistoryMsg = 48
+	maxStreamHistoryMsg = 180
 	minLayoutWidth      = 60
 	inputPrompt         = "> "
 	fastModeModel       = "gpt-5.1-codex-mini"
@@ -2450,18 +2450,32 @@ func (m model) renderSlashMenu(width int) string {
 	}
 
 	maxItems := minInt(6, len(m.slashItems))
-	visible := m.slashItems[:maxItems]
+	start := 0
+	if len(m.slashItems) > maxItems {
+		half := maxItems / 2
+		start = clampInt(m.slashIndex-half, 0, len(m.slashItems)-maxItems)
+	}
+	end := start + maxItems
+	if end > len(m.slashItems) {
+		end = len(m.slashItems)
+	}
+	visible := m.slashItems[start:end]
 	inner := maxInt(16, width-4)
 
-	rows := make([]string, 0, len(visible))
+	rows := make([]string, 0, len(visible)+1)
 	for idx, item := range visible {
+		absoluteIndex := start + idx
 		left := item.Command + "  " + item.Description
 		row := alignLeftRight(left, item.Keybind, inner-2)
-		if idx == m.slashIndex {
+		if absoluteIndex == m.slashIndex {
 			rows = append(rows, theme.DropdownSelected.Copy().Width(inner-2).Render(row))
 			continue
 		}
 		rows = append(rows, theme.DropdownRow.Copy().Width(inner-2).Render(row))
+	}
+	if len(m.slashItems) > maxItems {
+		status := fmt.Sprintf("↑/↓ more  %d/%d", m.slashIndex+1, len(m.slashItems))
+		rows = append(rows, theme.DropdownRow.Copy().Width(inner-2).Render(alignLeftRight(status, "", inner-2)))
 	}
 
 	return theme.DropdownBox.Copy().Width(inner).Render(strings.Join(rows, "\n"))

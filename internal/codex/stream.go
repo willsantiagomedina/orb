@@ -20,7 +20,7 @@ import (
 )
 
 const chatCompletionsEndpoint = "https://api.openai.com/v1/chat/completions"
-const codexExecTimeout = 120 * time.Second
+const codexExecTimeout = 15 * time.Minute
 
 const (
 	ExecutionModeUnblocked = "unblocked"
