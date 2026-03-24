@@ -36,6 +36,7 @@ const (
 	splashFrameCount    = 8
 	streamWatchInterval = 1 * time.Second
 	streamStallTimeout  = 6 * time.Minute
+	mouseEscapeWindow   = 250 * time.Millisecond
 	defaultScrollSpeed  = 3
 	maxStreamHistoryMsg = 180
 	minLayoutWidth      = 60
@@ -180,6 +181,9 @@ type model struct {
 	scrollSpeed int
 
 	input textarea.Model
+	// mouseEscapeSuppressUntil is a short suppression window for terminals that
+	// leak wheel CSI fragments into KeyRunes events.
+	mouseEscapeSuppressUntil time.Time
 
 	keys      keys.KeyMap
 	helpModel help.Model
@@ -590,7 +594,7 @@ func (m model) View() string {
 }
 
 func (m *model) handleKey(msg tea.KeyMsg) (tea.Cmd, bool) {
-	if isMouseEscapeSequenceKey(msg) {
+	if m.shouldSuppressMouseEscapeKey(msg) {
 		return nil, false
 	}
 
@@ -710,6 +714,9 @@ func (m *model) handleMouse(msg tea.MouseMsg) tea.Cmd {
 	if msg.Action != tea.MouseActionPress {
 		return nil
 	}
+	if msg.Button == tea.MouseButtonWheelUp || msg.Button == tea.MouseButtonWheelDown {
+		m.armMouseEscapeSuppressor()
+	}
 
 	if m.overlay != overlayNone {
 		return m.handleOverlayMouse(msg)
@@ -736,19 +743,12 @@ func (m *model) handleMouse(msg tea.MouseMsg) tea.Cmd {
 }
 
 func (m *model) handleInputMouse(msg tea.MouseMsg) tea.Cmd {
-	step := maxInt(1, m.scrollSpeed)
-
+	// Intentionally no-op in the input field to avoid terminals leaking wheel
+	// escape fragments into textarea content.
 	switch msg.Button { //nolint:exhaustive
-	case tea.MouseButtonWheelUp:
-		for i := 0; i < step; i++ {
-			m.input.CursorUp()
-		}
-	case tea.MouseButtonWheelDown:
-		for i := 0; i < step; i++ {
-			m.input.CursorDown()
-		}
+	case tea.MouseButtonWheelUp, tea.MouseButtonWheelDown:
+		return nil
 	}
-
 	return nil
 }
 
@@ -870,6 +870,41 @@ func isMouseEscapeSequenceKey(msg tea.KeyMsg) bool {
 		return true
 	}
 	return false
+}
+
+func (m *model) armMouseEscapeSuppressor() {
+	m.mouseEscapeSuppressUntil = time.Now().Add(mouseEscapeWindow)
+}
+
+func (m model) shouldSuppressMouseEscapeKey(msg tea.KeyMsg) bool {
+	if isMouseEscapeSequenceKey(msg) {
+		return true
+	}
+	if time.Now().After(m.mouseEscapeSuppressUntil) {
+		return false
+	}
+	return isMouseEscapeFragment(msg)
+}
+
+func isMouseEscapeFragment(msg tea.KeyMsg) bool {
+	if msg.Type != tea.KeyRunes || len(msg.Runes) == 0 {
+		return false
+	}
+	raw := string(msg.Runes)
+	if len(raw) > 16 {
+		return false
+	}
+	hasMarker := false
+	for _, r := range raw {
+		switch {
+		case r >= '0' && r <= '9':
+		case r == '[' || r == ']' || r == '<' || r == '>' || r == ';' || r == ':' || r == 'M' || r == 'm':
+			hasMarker = true
+		default:
+			return false
+		}
+	}
+	return hasMarker
 }
 
 func (m *model) handleOverlayKey(msg tea.KeyMsg) (tea.Cmd, bool) {
