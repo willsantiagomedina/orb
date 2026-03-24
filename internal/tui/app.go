@@ -550,6 +550,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case shellResultMsg:
 		cmd := m.handleShellResult(typed)
 		return m, cmd
+	case tea.MouseMsg:
+		return m, m.handleMouse(typed)
 	case tea.KeyMsg:
 		cmd, quit := m.handleKey(typed)
 		if quit {
@@ -700,6 +702,31 @@ func (m *model) handleKey(msg tea.KeyMsg) (tea.Cmd, bool) {
 	return cmd, false
 }
 
+func (m *model) handleMouse(msg tea.MouseMsg) tea.Cmd {
+	if msg.Action != tea.MouseActionPress {
+		return nil
+	}
+
+	if m.overlay != overlayNone {
+		return m.handleOverlayMouse(msg)
+	}
+
+	switch msg.Button { //nolint:exhaustive
+	case tea.MouseButtonWheelUp:
+		step := maxInt(1, m.scrollSpeed)
+		m.viewport.ScrollUp(step)
+		m.sticky = false
+	case tea.MouseButtonWheelDown:
+		step := maxInt(1, m.scrollSpeed)
+		m.viewport.ScrollDown(step)
+		if m.viewport.AtBottom() {
+			m.sticky = true
+		}
+	}
+
+	return nil
+}
+
 func (m *model) handleLeaderKey(msg tea.KeyMsg) (tea.Cmd, bool) {
 	if key.Matches(msg, m.keys.Quit) || msg.String() == "q" {
 		return nil, true
@@ -747,6 +774,22 @@ func (m *model) handleLeaderKey(msg tea.KeyMsg) (tea.Cmd, bool) {
 
 	m.appendActivity("system", "unknown leader key: "+msg.String(), false)
 	return nil, false
+}
+
+func (m *model) handleOverlayMouse(msg tea.MouseMsg) tea.Cmd {
+	switch m.overlay {
+	case overlayDiff, overlayGit, overlayActivity:
+		maxScroll := maxInt(0, len(m.overlayLines)-1)
+		step := maxInt(1, m.scrollSpeed)
+		switch msg.Button { //nolint:exhaustive
+		case tea.MouseButtonWheelUp:
+			m.overlayScroll = clampInt(m.overlayScroll-step, 0, maxScroll)
+		case tea.MouseButtonWheelDown:
+			m.overlayScroll = clampInt(m.overlayScroll+step, 0, maxScroll)
+		}
+	}
+
+	return nil
 }
 
 func (m *model) handleOverlayKey(msg tea.KeyMsg) (tea.Cmd, bool) {

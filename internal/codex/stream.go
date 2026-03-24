@@ -597,31 +597,51 @@ func truncateForEvent(text string, maxLen int) string {
 }
 
 func buildCodexExecPrompt(messages []Message) string {
-	var systemParts []string
-	var userParts []string
-	for _, message := range messages {
-		switch strings.ToLower(strings.TrimSpace(message.Role)) {
-		case "system":
-			if strings.TrimSpace(message.Content) != "" {
-				systemParts = append(systemParts, strings.TrimSpace(message.Content))
-			}
-		case "user":
-			if strings.TrimSpace(message.Content) != "" {
-				userParts = append(userParts, strings.TrimSpace(message.Content))
-			}
-		}
-	}
-
 	var builder strings.Builder
-	if len(systemParts) > 0 {
-		builder.WriteString("System instructions:\n")
-		builder.WriteString(strings.Join(systemParts, "\n\n"))
-		builder.WriteString("\n\n")
+	historyOpened := false
+
+	openHistory := func() {
+		if historyOpened {
+			builder.WriteString("\n\n")
+			return
+		}
+		if builder.Len() > 0 {
+			builder.WriteString("\n\n")
+		}
+		builder.WriteString("Conversation history:\n")
+		historyOpened = true
 	}
 
-	if len(userParts) > 0 {
-		builder.WriteString("User request:\n")
-		builder.WriteString(userParts[len(userParts)-1])
+	for _, message := range messages {
+		role := strings.ToLower(strings.TrimSpace(message.Role))
+		content := strings.TrimSpace(message.Content)
+		if content == "" {
+			continue
+		}
+
+		switch role {
+		case "system":
+			if builder.Len() > 0 {
+				builder.WriteString("\n\n")
+			}
+			builder.WriteString("System instructions:\n")
+			builder.WriteString(content)
+		case "user":
+			if builder.Len() > 0 {
+				builder.WriteString("\n\n")
+			}
+			builder.WriteString("User request:\n")
+			builder.WriteString(content)
+		case "assistant":
+			openHistory()
+			builder.WriteString("Assistant reply:\n")
+			builder.WriteString(content)
+		default:
+			openHistory()
+			builder.WriteString(codexPromptRoleLabel(role))
+			builder.WriteString(" message:\n")
+			builder.WriteString(content)
+		}
 	}
 
 	prompt := strings.TrimSpace(builder.String())
@@ -629,6 +649,19 @@ func buildCodexExecPrompt(messages []Message) string {
 		return "Respond helpfully to the user request."
 	}
 	return prompt
+}
+
+func codexPromptRoleLabel(role string) string {
+	switch strings.ToLower(strings.TrimSpace(role)) {
+	case "tool":
+		return "Tool"
+	case "reasoning":
+		return "Reasoning"
+	case "error":
+		return "Error"
+	default:
+		return "Message"
+	}
 }
 
 func consumeSSEStream(ctx context.Context, body io.Reader, events chan<- Event) error {
