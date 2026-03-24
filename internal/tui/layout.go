@@ -5,7 +5,7 @@ import (
 
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
-	"github.com/willdev/orb/internal/tui/theme"
+	"github.com/willsantiagomedina/orb/internal/tui/theme"
 )
 
 type zoneLayout struct {

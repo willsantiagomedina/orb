@@ -9,7 +9,7 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/willdev/orb/internal/config"
+	"github.com/willsantiagomedina/orb/internal/config"
 )
 
 // ErrNoAuth is returned when no Codex credential can be resolved.

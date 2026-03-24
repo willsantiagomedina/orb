@@ -16,7 +16,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/willdev/orb/internal/config"
+	"github.com/willsantiagomedina/orb/internal/config"
 )
 
 const chatCompletionsEndpoint = "https://api.openai.com/v1/chat/completions"
@@ -132,13 +132,17 @@ type codexExecEvent struct {
 }
 
 type codexExecItem struct {
-	ID               string `json:"id"`
-	Type             string `json:"type"`
-	Text             string `json:"text"`
-	Command          string `json:"command"`
-	AggregatedOutput string `json:"aggregated_output"`
-	ExitCode         *int   `json:"exit_code"`
-	Status           string `json:"status"`
+	ID               string          `json:"id"`
+	Type             string          `json:"type"`
+	Text             string          `json:"text"`
+	OutputText       string          `json:"output_text"`
+	Delta            string          `json:"delta"`
+	Content          json.RawMessage `json:"content"`
+	Message          json.RawMessage `json:"message"`
+	Command          string          `json:"command"`
+	AggregatedOutput string          `json:"aggregated_output"`
+	ExitCode         *int            `json:"exit_code"`
+	Status           string          `json:"status"`
 }
 
 func (e requestStatusError) Error() string {
@@ -469,6 +473,7 @@ func streamWithCodexCLI(
 	scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
 
 	sawTurnCompleted := false
+	assistantSnapshots := make(map[string]string)
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
 		if line == "" {
@@ -495,16 +500,14 @@ func streamWithCodexCLI(
 					return context.Canceled
 				}
 			}
-		case "item.completed":
-			switch parsed.Item.Type {
-			case "agent_message":
-				text := strings.TrimSpace(parsed.Item.Text)
-				if text != "" {
-					if !emitEvent(ctx, events, TokenEvent{Token: text}) {
-						return context.Canceled
-					}
+		case "item.updated", "item.delta", "item.completed":
+			if isExecAssistantMessageType(parsed.Item.Type) {
+				text := extractExecAssistantText(parsed.Item)
+				if !emitAssistantDelta(ctx, events, strings.TrimSpace(parsed.Item.ID), text, assistantSnapshots) {
+					return context.Canceled
 				}
-			case "command_execution":
+			}
+			if parsed.Type == "item.completed" && parsed.Item.Type == "command_execution" {
 				summary := renderCommandExecutionSummary(parsed.Item)
 				if summary != "" {
 					toolEvent := ToolCallEvent{
@@ -594,6 +597,150 @@ func truncateForEvent(text string, maxLen int) string {
 		return clean
 	}
 	return clean[:maxLen] + "..."
+}
+
+func isExecAssistantMessageType(itemType string) bool {
+	switch strings.ToLower(strings.TrimSpace(itemType)) {
+	case "agent_message", "assistant_message", "output_text":
+		return true
+	default:
+		return false
+	}
+}
+
+func emitAssistantDelta(
+	ctx context.Context,
+	events chan<- Event,
+	itemID string,
+	text string,
+	snapshots map[string]string,
+) bool {
+	sanitized := sanitizeStreamText(text)
+	if strings.TrimSpace(sanitized) == "" {
+		return true
+	}
+
+	if itemID == "" {
+		return emitEvent(ctx, events, TokenEvent{Token: sanitized})
+	}
+
+	previous := snapshots[itemID]
+	next := sanitized
+	if previous != "" {
+		switch {
+		case strings.HasPrefix(sanitized, previous):
+			next = sanitized[len(previous):]
+		case strings.HasPrefix(previous, sanitized):
+			next = ""
+		default:
+			next = "\n" + sanitized
+		}
+	}
+	snapshots[itemID] = sanitized
+	if strings.TrimSpace(next) == "" {
+		return true
+	}
+	return emitEvent(ctx, events, TokenEvent{Token: next})
+}
+
+func extractExecAssistantText(item codexExecItem) string {
+	parts := make([]string, 0, 8)
+	appendUniqueText(&parts, item.Text)
+	appendUniqueText(&parts, item.OutputText)
+	appendUniqueText(&parts, item.Delta)
+	for _, text := range extractTextFromRawJSON(item.Content) {
+		appendUniqueText(&parts, text)
+	}
+	for _, text := range extractTextFromRawJSON(item.Message) {
+		appendUniqueText(&parts, text)
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return strings.Join(parts, "\n\n")
+}
+
+func extractTextFromRawJSON(raw json.RawMessage) []string {
+	clean := strings.TrimSpace(string(raw))
+	if clean == "" || clean == "null" {
+		return nil
+	}
+
+	if strings.HasPrefix(clean, "\"") {
+		var text string
+		if err := json.Unmarshal(raw, &text); err != nil {
+			return nil
+		}
+		trimmed := strings.TrimSpace(text)
+		if trimmed == "" {
+			return nil
+		}
+		return []string{trimmed}
+	}
+
+	if strings.HasPrefix(clean, "[") {
+		var list []json.RawMessage
+		if err := json.Unmarshal(raw, &list); err != nil {
+			return nil
+		}
+		parts := make([]string, 0, len(list))
+		for _, item := range list {
+			for _, text := range extractTextFromRawJSON(item) {
+				appendUniqueText(&parts, text)
+			}
+		}
+		return parts
+	}
+
+	if strings.HasPrefix(clean, "{") {
+		var object map[string]json.RawMessage
+		if err := json.Unmarshal(raw, &object); err != nil {
+			return nil
+		}
+		keys := []string{"text", "output_text", "delta", "content", "message", "value", "parts"}
+		parts := make([]string, 0, len(keys))
+		for _, key := range keys {
+			value, ok := object[key]
+			if !ok {
+				continue
+			}
+			for _, text := range extractTextFromRawJSON(value) {
+				appendUniqueText(&parts, text)
+			}
+		}
+		return parts
+	}
+
+	return nil
+}
+
+func appendUniqueText(parts *[]string, text string) {
+	trimmed := strings.TrimSpace(text)
+	if trimmed == "" {
+		return
+	}
+	for _, existing := range *parts {
+		if existing == trimmed {
+			return
+		}
+	}
+	*parts = append(*parts, trimmed)
+}
+
+func sanitizeStreamText(text string) string {
+	if text == "" {
+		return ""
+	}
+	normalized := strings.ReplaceAll(text, "\r\n", "\n")
+	normalized = strings.ReplaceAll(normalized, "\r", "\n")
+	var builder strings.Builder
+	builder.Grow(len(normalized))
+	for _, r := range normalized {
+		if r == '\n' || r == '\t' || (r >= 0x20 && r != 0x7f) {
+			builder.WriteRune(r)
+		}
+	}
+	return builder.String()
 }
 
 func buildCodexExecPrompt(messages []Message) string {

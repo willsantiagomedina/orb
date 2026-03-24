@@ -18,14 +18,14 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
-	"github.com/willdev/orb/internal/agent"
-	"github.com/willdev/orb/internal/backend"
-	"github.com/willdev/orb/internal/codex"
-	"github.com/willdev/orb/internal/config"
-	"github.com/willdev/orb/internal/gitops"
-	"github.com/willdev/orb/internal/store"
-	"github.com/willdev/orb/internal/tui/keys"
-	"github.com/willdev/orb/internal/tui/theme"
+	"github.com/willsantiagomedina/orb/internal/agent"
+	"github.com/willsantiagomedina/orb/internal/backend"
+	"github.com/willsantiagomedina/orb/internal/codex"
+	"github.com/willsantiagomedina/orb/internal/config"
+	"github.com/willsantiagomedina/orb/internal/gitops"
+	"github.com/willsantiagomedina/orb/internal/store"
+	"github.com/willsantiagomedina/orb/internal/tui/keys"
+	"github.com/willsantiagomedina/orb/internal/tui/theme"
 )
 
 const (

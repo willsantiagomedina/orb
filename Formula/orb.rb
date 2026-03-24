@@ -1,7 +1,7 @@
 class Orb < Formula
   desc "CLI-native agentic coding interface for Codex and Claude"
-  homepage "https://github.com/willdev/orb"
-  head "https://github.com/willdev/orb.git", branch: "main"
+  homepage "https://github.com/willsantiagomedina/orb"
+  head "https://github.com/willsantiagomedina/orb.git", branch: "main"
 
   depends_on "go" => :build
 
@@ -11,7 +11,6 @@ class Orb < Formula
   end
 
   test do
-    assert_match "orb ", shell_output("#{bin}/orb --version")
+    assert_match "orb ", shell_output("#{bin}/orb -version")
   end
 end
-

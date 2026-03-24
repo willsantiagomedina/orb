@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/willdev/orb/internal/codex"
+	"github.com/willsantiagomedina/orb/internal/codex"
 )
 
 // CodexBackend adapts internal/codex to the shared Backend interface.

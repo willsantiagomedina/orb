@@ -9,13 +9,13 @@ import (
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/willdev/orb/internal/codex"
-	"github.com/willdev/orb/internal/config"
-	"github.com/willdev/orb/internal/store"
-	"github.com/willdev/orb/internal/tui"
+	"github.com/willsantiagomedina/orb/internal/codex"
+	"github.com/willsantiagomedina/orb/internal/config"
+	"github.com/willsantiagomedina/orb/internal/store"
+	"github.com/willsantiagomedina/orb/internal/tui"
 )
 
-const version = "0.1.0-dev"
+var version = "0.1.0-dev"
 
 func main() {
 	cfgPath := flag.String("config", "", "path to orb.toml configuration file")

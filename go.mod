@@ -1,4 +1,4 @@
-module github.com/willdev/orb
+module github.com/willsantiagomedina/orb
 
 go 1.25.5
 

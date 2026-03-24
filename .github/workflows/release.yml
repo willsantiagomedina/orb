@@ -1,0 +1,59 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Test
+        run: go test ./...
+
+      - name: Build macOS archives
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME}"
+          if [[ -z "${VERSION}" || "${VERSION}" == "main" ]]; then
+            VERSION="v0.1.0-dev"
+          fi
+
+          mkdir -p dist
+          for ARCH in amd64 arm64; do
+            OUT_DIR="dist/orb_${VERSION}_darwin_${ARCH}"
+            mkdir -p "${OUT_DIR}"
+
+            GOOS=darwin GOARCH="${ARCH}" go build \
+              -trimpath \
+              -ldflags="-s -w -X main.version=${VERSION}" \
+              -o "${OUT_DIR}/orb" \
+              ./cmd/orb
+
+            tar -C "${OUT_DIR}" -czf "dist/orb_${VERSION}_darwin_${ARCH}.tar.gz" orb
+            rm -rf "${OUT_DIR}"
+          done
+
+          shasum -a 256 dist/*.tar.gz > dist/checksums.txt
+
+      - name: Publish GitHub release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            dist/*.tar.gz
+            dist/checksums.txt

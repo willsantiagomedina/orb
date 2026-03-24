@@ -14,7 +14,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/willdev/orb/internal/config"
+	"github.com/willsantiagomedina/orb/internal/config"
 )
 
 const (
