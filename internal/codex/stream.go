@@ -391,10 +391,14 @@ func streamWithCodexCLI(
 		"--skip-git-repo-check",
 		"--json",
 		"--ephemeral",
+		"--full-auto",
 		"--color",
 		"never",
 		"--sandbox",
 		"workspace-write",
+	}
+	if workingDir := runtimeWorkingDir(); workingDir != "" {
+		args = append(args, "--cd", workingDir)
 	}
 	trimmedModel := strings.TrimSpace(modelName)
 	if trimmedModel != "" {

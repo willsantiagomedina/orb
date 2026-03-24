@@ -928,6 +928,7 @@ func (m *model) submitPrompt(prompt string, steer bool, mode composeMode) tea.Cm
 		return nil
 	}
 
+	m.sticky = true
 	m.recordPromptHistory(cleanPrompt)
 	m.appendEntry(threadEntry{Kind: threadUser, Text: cleanPrompt, Timestamp: time.Now()})
 	m.persistMessage("user", cleanPrompt)
@@ -1601,6 +1602,7 @@ func (m *model) selectTaskByIndex(index int) {
 	idx := clampInt(index, 0, len(m.tasks)-1)
 	m.taskIndex = idx
 	m.taskID = m.tasks[idx].ID
+	m.sticky = true
 	m.syncAgentsWithTasks()
 	if err := m.loadThreadForCurrentTask(); err != nil {
 		m.appendSystemEntry("thread load error: "+err.Error(), true)
@@ -1924,11 +1926,6 @@ func (m *model) handleStreamEvent(event backend.Event) bool {
 			return true
 		}
 		m.setActiveAgentStatus(agent.StatusThinking)
-		if m.thinking {
-			m.thinking = false
-			m.setThinkingText("thinking complete")
-			m.thinkingEntryIndex = -1
-		}
 		m.streamBuffer += token
 		if m.streamingAssistantIndex < 0 {
 			m.entries = append(m.entries, threadEntry{
