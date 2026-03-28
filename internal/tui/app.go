@@ -2801,7 +2801,7 @@ func (m model) renderSidebar(width int, height int) string {
 	}
 
 	lines := make([]string, 0, innerHeight)
-	lines = append(lines, sidebarSectionHeader("○", "GIT", innerWidth))
+	lines = append(lines, sidebarSectionHeader("●", "GIT", innerWidth))
 	lines = append(lines, sidebarKeyValueRow("branch", normalizeSidebarValue(m.branch), innerWidth))
 	lines = append(lines, sidebarKeyValueRow("status", normalizeSidebarValue(m.gitStatus), innerWidth))
 	lines = append(lines, sidebarKeyValueRow("path", worktree, innerWidth))
