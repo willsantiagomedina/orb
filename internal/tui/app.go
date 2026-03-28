@@ -2642,7 +2642,7 @@ func (m model) renderHeader() string {
 		versionSuffix = " " + theme.HeaderVersion.Render(m.version)
 	}
 	logo := theme.HeaderLogoMark.Render(theme.HeaderMarkGlyph) + " " + theme.HeaderLogoText.Render("ORB") + versionSuffix
-	sessionName := truncateWithEllipsis(strings.TrimSpace(m.currentTaskName()), 28)
+	sessionName := truncateWithEllipsis(taskShortName(m.currentTaskName()), 28)
 	left := logo + "  " + theme.HeaderDivider.Render("│") + "  " + theme.HeaderSession.Render(sessionName)
 
 	sep := "  " + theme.HeaderSep.Render("·") + "  "
@@ -2747,6 +2747,8 @@ func (m model) renderContent(contentHeight int) string {
 			lipgloss.Center,
 			lipgloss.Center,
 			overlayBox,
+			lipgloss.WithWhitespaceChars(" "),
+			lipgloss.WithWhitespaceBackground(theme.BG0),
 		)
 		return fillZone(maxInt(minLayoutWidth, m.width), contentHeight, theme.BG0, placed)
 	}
@@ -2916,7 +2918,10 @@ func (m model) renderEmptyCenter(width int, height int) string {
 		"",
 		card,
 	)
-	return lipgloss.Place(width, height, lipgloss.Center, lipgloss.Center, content)
+	return lipgloss.Place(width, height, lipgloss.Center, lipgloss.Center, content,
+		lipgloss.WithWhitespaceChars(" "),
+		lipgloss.WithWhitespaceBackground(theme.BG0),
+	)
 }
 
 func (m model) renderOverlayBox(contentHeight int) string {
@@ -3613,14 +3618,16 @@ func contextLimitForModel(model string) int {
 		return 200000
 	case strings.Contains(m, "haiku"):
 		return 200000
+	case strings.Contains(m, "gpt-5"):
+		return 1000000
 	case strings.Contains(m, "gpt-4o"):
 		return 128000
 	case strings.Contains(m, "gpt-4"):
 		return 128000
-	case strings.Contains(m, "o1") || strings.Contains(m, "o3"):
+	case strings.Contains(m, "o1") || strings.Contains(m, "o3") || strings.Contains(m, "o4"):
 		return 200000
 	default:
-		return 0
+		return 128000
 	}
 }
 
