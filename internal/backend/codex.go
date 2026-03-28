@@ -99,8 +99,9 @@ func (c *CodexBackend) Stream(ctx context.Context, messages []Message, toolDefs 
 	codexMessages := make([]codex.Message, 0, len(messages))
 	for _, message := range messages {
 		codexMessages = append(codexMessages, codex.Message{
-			Role:    message.Role,
-			Content: message.Content,
+			Role:       message.Role,
+			Content:    message.Content,
+			ImagePaths: message.ImagePaths,
 		})
 	}
 

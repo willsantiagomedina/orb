@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -37,8 +38,81 @@ var (
 
 // Message is a chat message sent to the Codex streaming endpoint.
 type Message struct {
-	Role    string `json:"role"`
-	Content string `json:"content"`
+	Role       string   `json:"role"`
+	Content    string   `json:"content"`
+	ImagePaths []string `json:"-"` // local image paths; serialised as multimodal content by buildAPIMessages
+}
+
+// apiMessage is the on-wire format for the chat completions API.
+// Content is json.RawMessage to support both plain-string and array (multimodal) values.
+type apiMessage struct {
+	Role    string          `json:"role"`
+	Content json.RawMessage `json:"content"`
+}
+
+// imageMediaType returns the MIME type for a local image path based on its extension.
+func imageMediaType(path string) string {
+	switch strings.ToLower(filepath.Ext(path)) {
+	case ".png":
+		return "image/png"
+	case ".gif":
+		return "image/gif"
+	case ".webp":
+		return "image/webp"
+	default:
+		return "image/jpeg"
+	}
+}
+
+// buildAPIMessages converts []Message into the wire format expected by the
+// chat completions API, embedding base64-encoded images when present.
+func buildAPIMessages(messages []Message) ([]apiMessage, error) {
+	result := make([]apiMessage, 0, len(messages))
+	for _, m := range messages {
+		if len(m.ImagePaths) == 0 {
+			contentJSON, err := json.Marshal(m.Content)
+			if err != nil {
+				return nil, fmt.Errorf("marshal text content: %w", err)
+			}
+			result = append(result, apiMessage{Role: m.Role, Content: contentJSON})
+			continue
+		}
+
+		// Multimodal message: text part + one image_url part per image.
+		type textPart struct {
+			Type string `json:"type"`
+			Text string `json:"text"`
+		}
+		type imageURLInner struct {
+			URL string `json:"url"`
+		}
+		type imageURLPart struct {
+			Type     string        `json:"type"`
+			ImageURL imageURLInner `json:"image_url"`
+		}
+		parts := make([]interface{}, 0, 1+len(m.ImagePaths))
+		if m.Content != "" {
+			parts = append(parts, textPart{Type: "text", Text: m.Content})
+		}
+		for _, imgPath := range m.ImagePaths {
+			raw, err := os.ReadFile(imgPath)
+			if err != nil {
+				continue // skip unreadable images silently
+			}
+			dataURL := "data:" + imageMediaType(imgPath) + ";base64," +
+				base64.StdEncoding.EncodeToString(raw)
+			parts = append(parts, imageURLPart{
+				Type:     "image_url",
+				ImageURL: imageURLInner{URL: dataURL},
+			})
+		}
+		contentJSON, err := json.Marshal(parts)
+		if err != nil {
+			return nil, fmt.Errorf("marshal multimodal content: %w", err)
+		}
+		result = append(result, apiMessage{Role: m.Role, Content: contentJSON})
+	}
+	return result, nil
 }
 
 // ToolDefinition describes a function tool available to the model.
@@ -86,7 +160,7 @@ func (ErrorEvent) isEvent()    {}
 
 type chatCompletionsRequest struct {
 	Model    string           `json:"model"`
-	Messages []Message        `json:"messages"`
+	Messages []apiMessage     `json:"messages"`
 	Tools    []ToolDefinition `json:"tools,omitempty"`
 	Stream   bool             `json:"stream"`
 }
@@ -344,9 +418,13 @@ func streamWithAPI(
 	toolDefs []ToolDefinition,
 	events chan<- Event,
 ) error {
+	apiMessages, err := buildAPIMessages(messages)
+	if err != nil {
+		return fmt.Errorf("build api messages: %w", err)
+	}
 	requestBody := chatCompletionsRequest{
 		Model:    modelName,
-		Messages: messages,
+		Messages: apiMessages,
 		Tools:    toolDefs,
 		Stream:   true,
 	}

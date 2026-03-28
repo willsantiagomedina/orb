@@ -102,15 +102,16 @@ const (
 )
 
 type threadEntry struct {
-	Kind       threadEntryKind
-	Text       string
-	Timestamp  time.Time
-	ToolID     string
-	ToolName   string
-	ToolArgs   string
-	ToolStatus string
-	ToolResult string
-	IsError    bool
+	Kind        threadEntryKind
+	Text        string
+	Timestamp   time.Time
+	ToolID      string
+	ToolName    string
+	ToolArgs    string
+	ToolStatus  string
+	ToolResult  string
+	IsError     bool
+	ImagePaths  []string // attached image file paths for user messages
 }
 
 type activityEntry struct {
@@ -221,10 +222,13 @@ type model struct {
 	streamStartedAt         time.Time
 	lastStreamEventAt       time.Time
 
-	currentModel string
-	currentMode  string
-	composeMode  composeMode
-	activeAgent  string
+	currentModel    string
+	currentMode     string
+	ctxInputTokens  int
+	ctxOutputTokens int
+	ctxLimit        int
+	composeMode     composeMode
+	activeAgent     string
 
 	showThinkingDetails bool
 	executionMode       string
@@ -271,6 +275,7 @@ var (
 	ansiOSCSequence = regexp.MustCompile(`\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)`)
 	ansiCSISequence = regexp.MustCompile(`\x1b\[[0-?]*[ -/]*[@-~]`)
 	ansiESCSequence = regexp.MustCompile(`\x1b[@-_]`)
+	taskNamePattern = regexp.MustCompile(`^Task \d{4}-\d{2}-\d{2}.*$`)
 )
 
 // New returns Orb's OpenCode-style root Bubble Tea model.
@@ -356,6 +361,7 @@ func New(
 		thinkingEntryIndex:      -1,
 		currentModel:            "gpt-5.4",
 		currentMode:             "medium",
+		ctxLimit:                contextLimitForModel("gpt-5.4"),
 		composeMode:             composeModeAgent,
 		showThinkingDetails:     false,
 		executionMode:           codex.ExecutionModeUnblocked,
@@ -635,6 +641,17 @@ func (m *model) handleKey(msg tea.KeyMsg) (tea.Cmd, bool) {
 	}
 
 	switch msg.String() {
+	case "alt+backspace", "ctrl+backspace":
+		// Delete entire current line (cmd+backspace behaviour on macOS).
+		// Simulate ctrl+e (line end) followed by ctrl+u (delete to line start).
+		m.input, _ = m.input.Update(tea.KeyMsg{Type: tea.KeyCtrlE})
+		var lineKillCmd tea.Cmd
+		m.input, lineKillCmd = m.input.Update(tea.KeyMsg{Type: tea.KeyCtrlU})
+		m.syncInputSize()
+		m.resizeViewport()
+		m.refreshViewport(false)
+		m.updateSlashMenu()
+		return lineKillCmd, false
 	case "G":
 		m.sticky = true
 		m.viewport.GotoBottom()
@@ -1025,6 +1042,7 @@ func (m *model) handleOverlaySelection() tea.Cmd {
 			if modelName != "" && m.backendClient != nil {
 				m.backendClient.SetRuntimeModel(modelName)
 				m.currentModel = modelName
+				m.ctxLimit = contextLimitForModel(modelName)
 				m.appendActivity("system", "model switched to "+modelName, true)
 				m.appendSystemEntry("model switched to "+modelName, false)
 			}
@@ -1098,9 +1116,19 @@ func (m *model) submitPrompt(prompt string, steer bool, mode composeMode) tea.Cm
 		return nil
 	}
 
+	// Expand @file references: inline text files, collect image paths.
+	expandedPrompt, imagePaths := expandAtFiles(cleanPrompt)
+	if strings.TrimSpace(expandedPrompt) == "" && len(imagePaths) == 0 {
+		return nil
+	}
+	if strings.TrimSpace(expandedPrompt) == "" {
+		expandedPrompt = "Please analyse the attached image(s)."
+	}
+	cleanPrompt = expandedPrompt
+
 	m.sticky = true
 	m.recordPromptHistory(cleanPrompt)
-	m.appendEntry(threadEntry{Kind: threadUser, Text: cleanPrompt, Timestamp: time.Now()})
+	m.appendEntry(threadEntry{Kind: threadUser, Text: cleanPrompt, Timestamp: time.Now(), ImagePaths: imagePaths})
 	m.persistMessage("user", cleanPrompt)
 	m.appendActivity("user", "prompt sent ("+composeModeLabel(mode)+")", true)
 
@@ -1223,6 +1251,7 @@ func (m *model) switchBackend(id backend.ID, persist bool) error {
 		modelName = defaultModelForBackend(selected)
 	}
 	m.currentModel = modelName
+	m.ctxLimit = contextLimitForModel(modelName)
 
 	reasoningEffort, effortErr := client.CurrentReasoningEffort()
 	if effortErr != nil {
@@ -2509,7 +2538,15 @@ func (m model) renderThreadEntry(index int, entry threadEntry, width int) string
 		inner := maxInt(20, safeWidth-2)
 		head := alignLeftRight(theme.UserLabel.Render("you"), theme.UserTimestamp.Render(timestamp), inner-2)
 		body := theme.UserBody.Copy().Width(inner - 2).Render(strings.TrimSpace(entry.Text))
-		box := theme.UserMessageBox.Copy().Width(inner).Render(head + "\n" + body)
+		boxContent := head + "\n" + body
+		if len(entry.ImagePaths) > 0 {
+			badges := make([]string, 0, len(entry.ImagePaths))
+			for _, p := range entry.ImagePaths {
+				badges = append(badges, theme.ShortcutKey.Render("img: "+filepath.Base(p)))
+			}
+			boxContent += "\n" + strings.Join(badges, "  ")
+		}
+		box := theme.UserMessageBox.Copy().Width(inner).Render(boxContent)
 		return indentLines(box, "  ")
 	case threadAssistant:
 		prefix := theme.AssistantMark.Render("◉") + "  " + theme.AssistantName.Render("orb")
@@ -2542,9 +2579,11 @@ func (m model) renderThreadEntry(index int, entry threadEntry, width int) string
 		if args == "" {
 			args = "{}"
 		}
+		const maxToolArgPreview = 72
 		firstArgLine := strings.SplitN(args, "\n", 2)[0]
-		if len(args) > len(firstArgLine) {
-			firstArgLine = truncateWithEllipsis(firstArgLine, inner-5) + "…"
+		argMaxWidth := minInt(maxToolArgPreview, maxInt(8, inner-2))
+		if len(args) > len(firstArgLine) || ansi.StringWidth(firstArgLine) > argMaxWidth {
+			firstArgLine = truncateWithEllipsis(firstArgLine, argMaxWidth)
 		}
 		argLine := theme.ToolArgs.Copy().Width(inner - 2).Render(firstArgLine)
 
@@ -2562,7 +2601,7 @@ func (m model) renderThreadEntry(index int, entry threadEntry, width int) string
 			}
 			resultText := strings.Join(shown, "\n")
 			if extra > 0 {
-				resultText += "\n" + theme.FooterMuted.Render(fmt.Sprintf("+%d lines", extra))
+				resultText += "\n" + theme.FooterMuted.Render(fmt.Sprintf("(+%d lines)", extra))
 			}
 			parts = append(parts, theme.AssistantRule.Render(strings.Repeat("─", maxInt(6, inner-2))))
 			parts = append(parts, theme.ToolResult.Copy().Width(inner-2).Render(resultText))
@@ -2575,11 +2614,11 @@ func (m model) renderThreadEntry(index int, entry threadEntry, width int) string
 			if elapsed == "" && index == m.thinkingEntryIndex && m.streaming {
 				elapsed = formatElapsedDuration(time.Since(m.thinkingStartedAt))
 			}
-			line := orbDotsFrame(m.thinkingFrame) + " thinking"
+			line := theme.ReasoningHead.Render(orbDotsFrame(m.thinkingFrame) + " thinking")
 			if elapsed != "" {
-				line += " " + elapsed
+				line += " " + theme.FooterMuted.Render(elapsed)
 			}
-			collapsed := theme.ReasoningHead.Render(line) + "  " + theme.ShortcutKey.Render("/thinking")
+			collapsed := line + "  " + theme.OverlayKeyPill.Render("/thinking")
 			return indentLines(collapsed, "  ")
 		}
 		rule := theme.ReasoningRule.Render(strings.Repeat("╌", maxInt(8, safeWidth-2)))
@@ -2609,14 +2648,15 @@ func (m model) renderHeader() string {
 	sep := "  " + theme.HeaderSep.Render("·") + "  "
 	modelStr := theme.HeaderModel.Render(m.currentModel)
 	modeStr := theme.HeaderMode.Render("mode:" + displayModeLabel(m.currentModel, m.currentMode))
-	branchStr := theme.HeaderBranch.Render("⎇ " + normalizeSidebarValue(m.branch))
+	branchStr := theme.HeaderBranch.Render("@ " + normalizeSidebarValue(m.branch))
 
 	authDot := theme.HeaderAuthErr.Render("●")
 	if m.authConnected {
 		authDot = theme.HeaderAuthOK.Render("●")
 	}
+	authStr := authDot + " " + theme.HeaderMode.Render("auth")
 
-	right := modelStr + sep + modeStr + sep + branchStr + "  " + authDot
+	right := modelStr + sep + modeStr + sep + branchStr + sep + authStr
 
 	line := alignLeftRight(left, right, maxInt(1, availableWidth-2))
 	return theme.HeaderBar.Copy().Width(availableWidth).Render(line)
@@ -2638,22 +2678,21 @@ func (m model) renderInputBar() string {
 	}
 	parts = append(parts, indentLines(field, "  "))
 
-	// Left: mode pill + model + mode label + token count
+	// Left: mode pill + model + mode label
 	modePill := theme.InputModePill.Render(strings.ToUpper(composeModeLabel(m.composeMode)))
 	modelStr := theme.InputModeText.Render(m.currentModel)
 	modeStr := theme.InputModeText.Render("mode:" + displayModeLabel(m.currentModel, m.currentMode))
 	sep := theme.FooterMuted.Render("  ·  ")
-	tokCount := formatTokenEstimate(estimateTokens(m.entries))
-	tokStr := theme.FooterMuted.Render("~" + tokCount)
-	left := modePill + "  " + modelStr + sep + modeStr + sep + tokStr
+	left := modePill + "  " + modelStr + sep + modeStr
 	if len(m.queuedPrompts) > 0 {
 		queuedStr := theme.FooterMuted.Render(fmt.Sprintf("  · %d queued", len(m.queuedPrompts)))
 		left += queuedStr
 	}
 
-	right := theme.FooterMuted.Render("tab cycle · ctrl+x ") + theme.FooterHelp.Render("[?]")
+	tokStr := theme.FooterMuted.Render(formatTokenEstimate(m.contextUsageTokens()))
+	right := tokStr + theme.FooterMuted.Render(" tokens  ·  tab cycle · ctrl+x ") + theme.FooterHelp.Render("[?]")
 	if m.streaming {
-		right = theme.FooterMuted.Render("enter queues · /steer · ctrl+x ") + theme.FooterHelp.Render("[?]")
+		right = tokStr + theme.FooterMuted.Render(" tokens  ·  enter queues · /steer · ctrl+x ") + theme.FooterHelp.Render("[?]")
 	}
 	footer := alignLeftRight(left, right, maxInt(20, availableWidth-4))
 	parts = append(parts, "  "+footer)
@@ -2762,13 +2801,13 @@ func (m model) renderSidebar(width int, height int) string {
 	}
 
 	lines := make([]string, 0, innerHeight)
-	lines = append(lines, sidebarSectionHeader("⎇", "GIT", innerWidth))
+	lines = append(lines, sidebarSectionHeader("○", "GIT", innerWidth))
 	lines = append(lines, sidebarKeyValueRow("branch", normalizeSidebarValue(m.branch), innerWidth))
 	lines = append(lines, sidebarKeyValueRow("status", normalizeSidebarValue(m.gitStatus), innerWidth))
 	lines = append(lines, sidebarKeyValueRow("path", worktree, innerWidth))
 	lines = append(lines, "")
 
-	lines = append(lines, sidebarSectionHeader("◈", "PLAN", innerWidth))
+	lines = append(lines, sidebarSectionHeader("◆", "PLAN", innerWidth))
 	if len(m.planItems) == 0 {
 		lines = append(lines, theme.SidebarMeta.Render(truncateAndPadANSI("  no active plan", innerWidth)))
 		lines = append(lines, theme.SidebarMeta.Render(truncateAndPadANSI("  ask orb to make a plan", innerWidth)))
@@ -2786,9 +2825,9 @@ func (m model) renderSidebar(width int, height int) string {
 	agentName := "n/a"
 	agentMode := "idle"
 	if snapshot, ok := m.activeAgentSnapshot(); ok {
-		agentName = taskShortName(snapshot.Name)
+		agentName = normalizeSidebarValue(taskShortName(snapshot.Name))
 		if agentName == "n/a" || agentName == "" {
-			agentName = taskShortName(snapshot.ID)
+			agentName = normalizeSidebarValue(taskShortName(snapshot.ID))
 		}
 		agentMode = agentStatusLabel(snapshot.Status)
 		if m.streaming && snapshot.Active {
@@ -2808,8 +2847,8 @@ func (m model) renderSidebar(width int, height int) string {
 	lines = append(lines, sidebarKeyValueRow("mode", displayModeLabel(m.currentModel, m.currentMode), innerWidth))
 
 	// Context usage bar
-	totalToks := estimateTokens(m.entries)
-	ctxLimit := contextLimitForModel(m.currentModel)
+	totalToks := m.contextUsageTokens()
+	ctxLimit := m.ctxLimit
 	if ctxLimit > 0 {
 		pct := float64(totalToks) / float64(ctxLimit)
 		barWidth := maxInt(4, innerWidth-12)
@@ -2837,7 +2876,7 @@ func (m model) renderSidebar(width int, height int) string {
 }
 
 func (m model) renderEmptyCenter(width int, height int) string {
-	cardWidth := clampInt(width-8, 36, 54)
+	cardWidth := clampInt(width-8, 36, 52)
 	innerWidth := cardWidth - 6 // card padding(0,2) + border = 6 chars
 
 	versionStr := ""
@@ -2853,13 +2892,15 @@ func (m model) renderEmptyCenter(width int, height int) string {
 		{"ctrl+p", "command palette"},
 		{"ctrl+x n", "new session"},
 		{"ctrl+x s", "sessions"},
-		{"ctrl+x h", "help & keybindings"},
-		{"/resume", "continue a session"},
+		{"ctrl+x h", "help"},
+		{"/resume", "continue session"},
 	}
 
 	rows := make([]string, 0, len(shortcuts))
+	rows = append(rows, theme.SidebarMeta.Render(truncateAndPadANSI("quick reference", innerWidth)))
+	rows = append(rows, "")
 	for _, s := range shortcuts {
-		pill := theme.ShortcutKey.Render(s.key)
+		pill := theme.OverlayKeyPill.Render(s.key)
 		pillWidth := ansi.StringWidth(s.key) + 2 // padding(0,1) each side
 		descWidth := maxInt(1, innerWidth-pillWidth-2)
 		desc := theme.ShortcutDesc.Render(truncateWithEllipsis(s.desc, descWidth))
@@ -3144,7 +3185,7 @@ func (m model) buildStreamMessages(prompt string) []backend.Message {
 		case threadUser:
 			text := strings.TrimSpace(entry.Text)
 			if text != "" {
-				history = append(history, backend.Message{Role: "user", Content: text})
+				history = append(history, backend.Message{Role: "user", Content: text, ImagePaths: entry.ImagePaths})
 			}
 		case threadAssistant:
 			text := strings.TrimSpace(entry.Text)
@@ -3189,6 +3230,16 @@ func (m model) buildStreamMessages(prompt string) []backend.Message {
 		history = history[len(history)-maxStreamHistoryMsg:]
 	}
 
+	// Find any image paths stored on the most recent user entry that matches cleanPrompt.
+	var promptImagePaths []string
+	for i := len(m.entries) - 1; i >= 0; i-- {
+		e := m.entries[i]
+		if e.Kind == threadUser && strings.TrimSpace(e.Text) == cleanPrompt {
+			promptImagePaths = e.ImagePaths
+			break
+		}
+	}
+
 	messages := make([]backend.Message, 0, len(history)+2)
 	messages = append(messages, backend.Message{
 		Role:    "system",
@@ -3197,8 +3248,9 @@ func (m model) buildStreamMessages(prompt string) []backend.Message {
 	messages = append(messages, history...)
 	if cleanPrompt != "" {
 		messages = append(messages, backend.Message{
-			Role:    "user",
-			Content: cleanPrompt,
+			Role:       "user",
+			Content:    cleanPrompt,
+			ImagePaths: promptImagePaths,
 		})
 	}
 
@@ -3572,6 +3624,55 @@ func contextLimitForModel(model string) int {
 	}
 }
 
+// isImageExtension returns true if ext (including leading dot) is a supported image type.
+func isImageExtension(ext string) bool {
+	switch strings.ToLower(ext) {
+	case ".jpg", ".jpeg", ".png", ".gif", ".webp":
+		return true
+	}
+	return false
+}
+
+// expandAtFiles scans a prompt for @path tokens.  Text-file paths are inlined;
+// image paths are collected and removed from the returned text.
+// Returns the cleaned prompt text, a list of image paths, and a human-readable
+// list of inlined file names for display purposes.
+func expandAtFiles(prompt string) (text string, imagePaths []string) {
+	words := strings.Fields(prompt)
+	var kept []string
+	for _, w := range words {
+		if !strings.HasPrefix(w, "@") {
+			kept = append(kept, w)
+			continue
+		}
+		rawPath := strings.TrimPrefix(w, "@")
+		absPath := rawPath
+		if !filepath.IsAbs(absPath) {
+			if cwd, err := os.Getwd(); err == nil {
+				absPath = filepath.Join(cwd, rawPath)
+			}
+		}
+		ext := filepath.Ext(absPath)
+		if isImageExtension(ext) {
+			if _, err := os.Stat(absPath); err == nil {
+				imagePaths = append(imagePaths, absPath)
+				// Remove token from prompt text; it'll appear as a badge instead.
+				continue
+			}
+		}
+		// For non-image files, try to inline the content.
+		if data, err := os.ReadFile(absPath); err == nil {
+			name := filepath.Base(absPath)
+			inlined := fmt.Sprintf("\n\n[File: %s]\n```\n%s\n```", name, string(data))
+			kept = append(kept, inlined)
+			continue
+		}
+		// Not a valid path — keep as literal text.
+		kept = append(kept, w)
+	}
+	return strings.TrimSpace(strings.Join(kept, " ")), imagePaths
+}
+
 func normalizeSidebarValue(s string) string {
 	s = strings.TrimSpace(s)
 	if s == "" || strings.Contains(strings.ToLower(s), "unavailable") {
@@ -3587,7 +3688,7 @@ func taskShortName(name string) string {
 	if name == "" {
 		return "n/a"
 	}
-	if strings.HasPrefix(name, "Task ") && len(name) > 5 {
+	if taskNamePattern.MatchString(name) {
 		return "task"
 	}
 	return name
@@ -3610,6 +3711,14 @@ func renderMiniProgressBar(pct float64, barWidth int) string {
 	fillStr := strings.Repeat("█", filled)
 	emptyStr := strings.Repeat("░", barWidth-filled)
 	return theme.ProgressFill.Render(fillStr) + theme.ProgressEmpty.Render(emptyStr)
+}
+
+func (m model) contextUsageTokens() int {
+	total := m.ctxInputTokens + m.ctxOutputTokens
+	if total > 0 {
+		return total
+	}
+	return estimateTokens(m.entries)
 }
 
 func agentStatusLabel(status agent.Status) string {

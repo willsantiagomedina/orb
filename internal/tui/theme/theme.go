@@ -109,8 +109,8 @@ var (
 	SidebarPlanTodo = lipgloss.NewStyle().Foreground(Warning).Background(BG1)
 	SidebarPlanDone = lipgloss.NewStyle().Foreground(Success).Background(BG1)
 
-	ProgressFill  = lipgloss.NewStyle().Foreground(Purple2)
-	ProgressEmpty = lipgloss.NewStyle().Foreground(Grey1)
+	ProgressFill  = lipgloss.NewStyle().Foreground(Purple2).Background(BG1)
+	ProgressEmpty = lipgloss.NewStyle().Foreground(Grey0).Background(BG1)
 
 	ShortcutCard = lipgloss.NewStyle().
 			Background(BG2).

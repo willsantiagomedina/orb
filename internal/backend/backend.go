@@ -20,8 +20,9 @@ const (
 
 // Message is one chat message sent to a backend stream.
 type Message struct {
-	Role    string
-	Content string
+	Role       string
+	Content    string
+	ImagePaths []string // optional local image file paths for multimodal messages
 }
 
 // ToolDefinition defines one callable tool for a backend.

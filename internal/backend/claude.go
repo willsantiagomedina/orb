@@ -399,6 +399,25 @@ func diffAssistantText(previous string, next string) string {
 	return next
 }
 
+// collectImagePaths returns a deduplicated list of all image paths across all messages.
+func collectImagePaths(messages []Message) []string {
+	seen := make(map[string]struct{})
+	var paths []string
+	for _, m := range messages {
+		for _, p := range m.ImagePaths {
+			p = strings.TrimSpace(p)
+			if p == "" {
+				continue
+			}
+			if _, ok := seen[p]; !ok {
+				seen[p] = struct{}{}
+				paths = append(paths, p)
+			}
+		}
+	}
+	return paths
+}
+
 func buildClaudePrompt(messages []Message, toolDefs []ToolDefinition) string {
 	systemParts := make([]string, 0, len(messages))
 	userParts := make([]string, 0, len(messages))
@@ -449,6 +468,16 @@ func buildClaudePrompt(messages []Message, toolDefs []ToolDefinition) string {
 	if len(userParts) > 0 {
 		builder.WriteString("User request:\n")
 		builder.WriteString(userParts[len(userParts)-1])
+	}
+
+	// Append image file references so the Claude Code agent can read them.
+	if imagePaths := collectImagePaths(messages); len(imagePaths) > 0 {
+		builder.WriteString("\n\nAttached images (please read and analyse each one):\n")
+		for _, p := range imagePaths {
+			builder.WriteString("- ")
+			builder.WriteString(p)
+			builder.WriteString("\n")
+		}
 	}
 
 	return strings.TrimSpace(builder.String())
