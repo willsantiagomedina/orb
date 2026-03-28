@@ -1550,7 +1550,7 @@ func (m *model) openAgentsOverlay() {
 	if m.agentPool != nil {
 		agents := m.agentPool.List()
 		for _, snapshot := range agents {
-			indicator := "○"
+			indicator := "·"
 			if snapshot.Active {
 				indicator = "●"
 			}
@@ -2559,7 +2559,7 @@ func (m model) renderThreadEntry(index int, entry threadEntry, width int) string
 		inner := maxInt(20, safeWidth-2)
 		status := theme.ToolStatusDone.Render("✓ done")
 		if entry.ToolStatus == "running" {
-			status = theme.ToolStatusRun.Render("○ running…")
+			status = theme.ToolStatusRun.Render("~ running…")
 		}
 		if entry.ToolStatus == "error" {
 			status = theme.ToolStatusErr.Render("✗ error")
@@ -2801,7 +2801,7 @@ func (m model) renderSidebar(width int, height int) string {
 	}
 
 	lines := make([]string, 0, innerHeight)
-	lines = append(lines, sidebarSectionHeader("●", "GIT", innerWidth))
+	lines = append(lines, sidebarSectionHeader("◆", "GIT", innerWidth))
 	lines = append(lines, sidebarKeyValueRow("branch", normalizeSidebarValue(m.branch), innerWidth))
 	lines = append(lines, sidebarKeyValueRow("status", normalizeSidebarValue(m.gitStatus), innerWidth))
 	lines = append(lines, sidebarKeyValueRow("path", worktree, innerWidth))
@@ -3008,7 +3008,7 @@ func (m model) renderSelectionOverlay(title string, overlayWidth int, overlayHei
 		end := minInt(len(m.overlayItems), start+visibleCount)
 		for idx := start; idx < end; idx++ {
 			item := m.overlayItems[idx]
-			prefix := "○"
+			prefix := "·"
 			if m.overlay == overlayAgents {
 				prefix = ""
 			}
@@ -3594,9 +3594,9 @@ func sidebarKeyValueRow(label string, value string, width int) string {
 func sidebarPlanRow(item planItem, width int) string {
 	safeWidth := maxInt(1, width)
 	textWidth := maxInt(1, safeWidth-2)
-	marker := theme.SidebarPlanTodo.Render("○")
+	marker := theme.SidebarPlanTodo.Render("·")
 	if item.Done {
-		marker = theme.SidebarPlanDone.Render("●")
+		marker = theme.SidebarPlanDone.Render("✓")
 	}
 	text := truncateAndPadANSI(strings.TrimSpace(item.Text), textWidth)
 	return marker + " " + theme.SidebarValue.Render(text)
@@ -3709,7 +3709,7 @@ func renderMiniProgressBar(pct float64, barWidth int) string {
 		filled = barWidth
 	}
 	fillStr := strings.Repeat("█", filled)
-	emptyStr := strings.Repeat("░", barWidth-filled)
+	emptyStr := strings.Repeat("─", barWidth-filled)
 	return theme.ProgressFill.Render(fillStr) + theme.ProgressEmpty.Render(emptyStr)
 }
 
@@ -3735,22 +3735,22 @@ func agentStatusLabel(status agent.Status) string {
 func renderAgentStatusBadge(status agent.Status) string {
 	switch status {
 	case agent.StatusThinking:
-		return theme.ToolStatusRun.Render("◉ ○ ○ thinking")
+		return theme.ToolStatusRun.Render("◉ · · thinking")
 	case agent.StatusTool:
 		return theme.ToolStatusRun.Render("◉ tool")
 	default:
-		return theme.ToolStatusDone.Render("○ idle")
+		return theme.ToolStatusDone.Render("· idle")
 	}
 }
 
 func orbDotsFrame(frame int) string {
 	switch frame % 3 {
 	case 1:
-		return "○ ◉ ○"
+		return "· ◉ ·"
 	case 2:
-		return "○ ○ ◉"
+		return "· · ◉"
 	default:
-		return "◉ ○ ○"
+		return "◉ · ·"
 	}
 }
 
