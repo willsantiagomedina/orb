@@ -2522,7 +2522,7 @@ func (m model) renderThreadEntry(index int, entry threadEntry, width int) string
 		inner := maxInt(20, safeWidth-2)
 		status := theme.ToolStatusDone.Render("✓ done")
 		if entry.ToolStatus == "running" {
-			status = theme.ToolStatusRun.Render("○ running...")
+			status = theme.ToolStatusRun.Render("○ running…")
 		}
 		if entry.ToolStatus == "error" {
 			status = theme.ToolStatusErr.Render("✗ error")
@@ -2532,21 +2532,40 @@ func (m model) renderThreadEntry(index int, entry threadEntry, width int) string
 		if toolName == "" {
 			toolName = "tool"
 		}
+
+		// Compact header: arrow + name left, status right
+		arrowName := theme.ToolCallArrow.Render("→") + " " + theme.ToolCallName.Render(toolName)
+		headerLine := alignLeftRight(arrowName, status, inner-2)
+
+		// Args: first line only, capped at inner-2 width
 		args := strings.TrimSpace(entry.ToolArgs)
 		if args == "" {
 			args = "{}"
 		}
-
-		line := alignLeftRight(theme.ToolCallName.Render(toolName), status, inner-2)
-		argLine := theme.ToolArgs.Copy().Width(inner - 2).Render(args)
-		parts := []string{
-			theme.ToolCallLabel.Render("tool call"),
-			line,
-			argLine,
+		firstArgLine := strings.SplitN(args, "\n", 2)[0]
+		if len(args) > len(firstArgLine) {
+			firstArgLine = truncateWithEllipsis(firstArgLine, inner-5) + "…"
 		}
-		if strings.TrimSpace(entry.ToolResult) != "" {
+		argLine := theme.ToolArgs.Copy().Width(inner - 2).Render(firstArgLine)
+
+		parts := []string{headerLine, argLine}
+
+		// Result: up to 3 lines, with overflow indicator
+		if result := strings.TrimSpace(entry.ToolResult); result != "" {
+			resultLines := strings.Split(result, "\n")
+			maxResultLines := 3
+			shown := resultLines
+			extra := 0
+			if len(resultLines) > maxResultLines {
+				shown = resultLines[:maxResultLines]
+				extra = len(resultLines) - maxResultLines
+			}
+			resultText := strings.Join(shown, "\n")
+			if extra > 0 {
+				resultText += "\n" + theme.FooterMuted.Render(fmt.Sprintf("+%d lines", extra))
+			}
 			parts = append(parts, theme.AssistantRule.Render(strings.Repeat("─", maxInt(6, inner-2))))
-			parts = append(parts, theme.ToolResult.Copy().Width(inner-2).Render(entry.ToolResult))
+			parts = append(parts, theme.ToolResult.Copy().Width(inner-2).Render(resultText))
 		}
 		box := theme.ToolCallBox.Copy().Width(inner).Render(strings.Join(parts, "\n"))
 		return indentLines(box, "  ")
@@ -2560,7 +2579,7 @@ func (m model) renderThreadEntry(index int, entry threadEntry, width int) string
 			if elapsed != "" {
 				line += " " + elapsed
 			}
-			collapsed := theme.ReasoningHead.Render(line) + " " + theme.FooterMuted.Render("(/thinking expand)")
+			collapsed := theme.ReasoningHead.Render(line) + "  " + theme.ShortcutKey.Render("/thinking")
 			return indentLines(collapsed, "  ")
 		}
 		rule := theme.ReasoningRule.Render(strings.Repeat("╌", maxInt(8, safeWidth-2)))
@@ -2579,25 +2598,25 @@ func (m model) renderThreadEntry(index int, entry threadEntry, width int) string
 func (m model) renderHeader() string {
 	availableWidth := maxInt(minLayoutWidth, m.width)
 
-	logo := theme.HeaderLogoMark.Render(theme.HeaderMarkGlyph) + " " + theme.HeaderLogoText.Render("ORB")
-	sessionName := truncateWithEllipsis(strings.TrimSpace(m.currentTaskName()), 24)
-	left := logo + " " + theme.HeaderDivider.Render("│") + " " + theme.HeaderSession.Render(sessionName)
-
-	rightParts := []string{
-		theme.HeaderModel.Render("backend:" + string(m.backendID)),
-		theme.HeaderModel.Render(m.currentModel),
-		theme.HeaderModel.Render("mode:" + displayModeLabel(m.currentModel, m.currentMode)),
-		theme.HeaderModel.Render("exec:" + m.executionMode),
-		theme.HeaderModel.Render("input:" + composeModeLabel(m.composeMode)),
-		theme.HeaderBranch.Render("⎇ " + strings.TrimSpace(m.branch)),
+	versionSuffix := ""
+	if strings.TrimSpace(m.version) != "" {
+		versionSuffix = " " + theme.HeaderVersion.Render(m.version)
 	}
+	logo := theme.HeaderLogoMark.Render(theme.HeaderMarkGlyph) + " " + theme.HeaderLogoText.Render("ORB") + versionSuffix
+	sessionName := truncateWithEllipsis(strings.TrimSpace(m.currentTaskName()), 28)
+	left := logo + "  " + theme.HeaderDivider.Render("│") + "  " + theme.HeaderSession.Render(sessionName)
+
+	sep := "  " + theme.HeaderSep.Render("·") + "  "
+	modelStr := theme.HeaderModel.Render(m.currentModel)
+	modeStr := theme.HeaderMode.Render("mode:" + displayModeLabel(m.currentModel, m.currentMode))
+	branchStr := theme.HeaderBranch.Render("⎇ " + normalizeSidebarValue(m.branch))
 
 	authDot := theme.HeaderAuthErr.Render("●")
 	if m.authConnected {
 		authDot = theme.HeaderAuthOK.Render("●")
 	}
-	rightParts = append(rightParts, authDot)
-	right := strings.Join(rightParts, "  ")
+
+	right := modelStr + sep + modeStr + sep + branchStr + "  " + authDot
 
 	line := alignLeftRight(left, right, maxInt(1, availableWidth-2))
 	return theme.HeaderBar.Copy().Width(availableWidth).Render(line)
@@ -2619,25 +2638,24 @@ func (m model) renderInputBar() string {
 	}
 	parts = append(parts, indentLines(field, "  "))
 
-	tokenText := theme.FooterMuted.Render(
-		fmt.Sprintf("input:%s · %s tokens", composeModeLabel(m.composeMode), formatTokenEstimate(estimateTokens(m.entries))),
-	)
+	// Left: mode pill + model + mode label + token count
+	modePill := theme.InputModePill.Render(strings.ToUpper(composeModeLabel(m.composeMode)))
+	modelStr := theme.InputModeText.Render(m.currentModel)
+	modeStr := theme.InputModeText.Render("mode:" + displayModeLabel(m.currentModel, m.currentMode))
+	sep := theme.FooterMuted.Render("  ·  ")
+	tokCount := formatTokenEstimate(estimateTokens(m.entries))
+	tokStr := theme.FooterMuted.Render("~" + tokCount)
+	left := modePill + "  " + modelStr + sep + modeStr + sep + tokStr
 	if len(m.queuedPrompts) > 0 {
-		tokenText = theme.FooterMuted.Render(
-			fmt.Sprintf(
-				"input:%s · %s tokens · %d queued",
-				composeModeLabel(m.composeMode),
-				formatTokenEstimate(estimateTokens(m.entries)),
-				len(m.queuedPrompts),
-			),
-		)
+		queuedStr := theme.FooterMuted.Render(fmt.Sprintf("  · %d queued", len(m.queuedPrompts)))
+		left += queuedStr
 	}
 
-	right := theme.FooterMuted.Render("tab cycle mode · ctrl+x keybinds ") + theme.FooterHelp.Render("[cmd+?]")
+	right := theme.FooterMuted.Render("tab cycle · ctrl+x ") + theme.FooterHelp.Render("[?]")
 	if m.streaming {
-		right = theme.FooterMuted.Render("enter queues · /steer interrupts · tab cycle mode · ") + theme.FooterHelp.Render("[cmd+?]")
+		right = theme.FooterMuted.Render("enter queues · /steer · ctrl+x ") + theme.FooterHelp.Render("[?]")
 	}
-	footer := alignLeftRight(tokenText, right, maxInt(20, availableWidth-4))
+	footer := alignLeftRight(left, right, maxInt(20, availableWidth-4))
 	parts = append(parts, "  "+footer)
 
 	body := strings.Join(parts, "\n")
@@ -2744,16 +2762,16 @@ func (m model) renderSidebar(width int, height int) string {
 	}
 
 	lines := make([]string, 0, innerHeight)
-	lines = append(lines, sidebarSectionHeader("WORKTREE", innerWidth))
-	lines = append(lines, sidebarKeyValueRow("branch", strings.TrimSpace(m.branch), innerWidth))
-	lines = append(lines, sidebarKeyValueRow("status", strings.TrimSpace(m.gitStatus), innerWidth))
+	lines = append(lines, sidebarSectionHeader("⎇", "GIT", innerWidth))
+	lines = append(lines, sidebarKeyValueRow("branch", normalizeSidebarValue(m.branch), innerWidth))
+	lines = append(lines, sidebarKeyValueRow("status", normalizeSidebarValue(m.gitStatus), innerWidth))
 	lines = append(lines, sidebarKeyValueRow("path", worktree, innerWidth))
 	lines = append(lines, "")
 
-	lines = append(lines, sidebarSectionHeader("PLAN", innerWidth))
+	lines = append(lines, sidebarSectionHeader("◈", "PLAN", innerWidth))
 	if len(m.planItems) == 0 {
-		lines = append(lines, theme.SidebarMeta.Render(truncateAndPadANSI("○ No active plan yet", innerWidth)))
-		lines = append(lines, theme.SidebarMeta.Render(truncateAndPadANSI("○ Ask Orb to make a plan", innerWidth)))
+		lines = append(lines, theme.SidebarMeta.Render(truncateAndPadANSI("  no active plan", innerWidth)))
+		lines = append(lines, theme.SidebarMeta.Render(truncateAndPadANSI("  ask orb to make a plan", innerWidth)))
 	} else {
 		for idx, item := range m.planItems {
 			if idx >= 10 {
@@ -2764,14 +2782,13 @@ func (m model) renderSidebar(width int, height int) string {
 	}
 	lines = append(lines, "")
 
-	lines = append(lines, sidebarSectionHeader("SESSION", innerWidth))
-	lines = append(lines, sidebarKeyValueRow("events", fmt.Sprintf("%d", len(m.activity)), innerWidth))
+	lines = append(lines, sidebarSectionHeader("◉", "SESSION", innerWidth))
 	agentName := "n/a"
 	agentMode := "idle"
 	if snapshot, ok := m.activeAgentSnapshot(); ok {
-		agentName = strings.TrimSpace(snapshot.Name)
-		if agentName == "" {
-			agentName = snapshot.ID
+		agentName = taskShortName(snapshot.Name)
+		if agentName == "n/a" || agentName == "" {
+			agentName = taskShortName(snapshot.ID)
 		}
 		agentMode = agentStatusLabel(snapshot.Status)
 		if m.streaming && snapshot.Active {
@@ -2786,10 +2803,22 @@ func (m model) renderSidebar(width int, height int) string {
 	}
 	lines = append(lines, sidebarKeyValueRow("agent", agentName, innerWidth))
 	lines = append(lines, sidebarKeyValueRow("status", agentMode, innerWidth))
-	lines = append(lines, sidebarKeyValueRow("backend", string(m.backendID), innerWidth))
+	lines = append(lines, sidebarKeyValueRow("events", fmt.Sprintf("%d", len(m.activity)), innerWidth))
 	lines = append(lines, sidebarKeyValueRow("model", m.currentModel, innerWidth))
 	lines = append(lines, sidebarKeyValueRow("mode", displayModeLabel(m.currentModel, m.currentMode), innerWidth))
-	lines = append(lines, sidebarKeyValueRow("input", composeModeLabel(m.composeMode), innerWidth))
+
+	// Context usage bar
+	totalToks := estimateTokens(m.entries)
+	ctxLimit := contextLimitForModel(m.currentModel)
+	if ctxLimit > 0 {
+		pct := float64(totalToks) / float64(ctxLimit)
+		barWidth := maxInt(4, innerWidth-12)
+		bar := renderMiniProgressBar(pct, barWidth)
+		pctStr := fmt.Sprintf(" %d%%", int(pct*100))
+		ctxRow := theme.SidebarLabel.Render("ctx: ") + bar + theme.SidebarMeta.Render(pctStr)
+		lines = append(lines, truncateAndPadANSI(ctxRow, innerWidth))
+	}
+	lines = append(lines, sidebarKeyValueRow("tokens", formatTokenEstimate(totalToks), innerWidth))
 	if len(m.queuedPrompts) > 0 {
 		lines = append(lines, sidebarKeyValueRow("queued", fmt.Sprintf("%d", len(m.queuedPrompts)), innerWidth))
 	}
@@ -2808,17 +2837,44 @@ func (m model) renderSidebar(width int, height int) string {
 }
 
 func (m model) renderEmptyCenter(width int, height int) string {
-	lines := []string{
-		theme.SplashMark.Render(theme.HeaderMarkGlyph) + " " + theme.SplashWord.Render("ORB"),
-		"",
-		theme.SystemMuted.Render("new session ready"),
-		theme.FooterMuted.Render("type a message below to start chatting"),
-		theme.FooterMuted.Render("or use /resume to continue an older chat"),
-		theme.FooterMuted.Render("tab cycles input modes: agent → plan → terminal"),
-		"",
-		theme.FooterHelp.Render("/resume") + theme.FooterMuted.Render("  /models  /help"),
+	cardWidth := clampInt(width-8, 36, 54)
+	innerWidth := cardWidth - 6 // card padding(0,2) + border = 6 chars
+
+	versionStr := ""
+	if strings.TrimSpace(m.version) != "" {
+		versionStr = "  " + theme.HeaderVersion.Render(m.version)
 	}
-	content := strings.Join(lines, "\n")
+	title := theme.SplashMark.Render(theme.HeaderMarkGlyph) + " " + theme.SplashWord.Render("ORB") + versionStr
+	subtitle := theme.SystemMuted.Render("new session ready")
+
+	type shortcut struct{ key, desc string }
+	shortcuts := []shortcut{
+		{"tab", "cycle: agent → plan → terminal"},
+		{"ctrl+p", "command palette"},
+		{"ctrl+x n", "new session"},
+		{"ctrl+x s", "sessions"},
+		{"ctrl+x h", "help & keybindings"},
+		{"/resume", "continue a session"},
+	}
+
+	rows := make([]string, 0, len(shortcuts))
+	for _, s := range shortcuts {
+		pill := theme.ShortcutKey.Render(s.key)
+		pillWidth := ansi.StringWidth(s.key) + 2 // padding(0,1) each side
+		descWidth := maxInt(1, innerWidth-pillWidth-2)
+		desc := theme.ShortcutDesc.Render(truncateWithEllipsis(s.desc, descWidth))
+		rows = append(rows, pill+"  "+desc)
+	}
+
+	cardBody := strings.Join(rows, "\n")
+	card := theme.ShortcutCard.Copy().Width(cardWidth).Render(cardBody)
+
+	content := lipgloss.JoinVertical(lipgloss.Center,
+		title,
+		subtitle,
+		"",
+		card,
+	)
 	return lipgloss.Place(width, height, lipgloss.Center, lipgloss.Center, content)
 }
 
@@ -3449,15 +3505,18 @@ func alignLeftRight(left string, right string, width int) string {
 	return left + strings.Repeat(" ", padding) + right
 }
 
-func sidebarSectionHeader(title string, width int) string {
+func sidebarSectionHeader(glyph string, title string, width int) string {
 	safeWidth := maxInt(1, width)
 	cleanTitle := strings.TrimSpace(title)
 	if cleanTitle == "" {
 		return strings.Repeat(" ", safeWidth)
 	}
 
-	label := theme.SidebarTitle.Render(cleanTitle)
-	ruleWidth := maxInt(0, safeWidth-ansi.StringWidth(cleanTitle)-1)
+	prefix := theme.SidebarIcon.Render(glyph) + " "
+	prefixWidth := ansi.StringWidth(glyph) + 1
+	label := prefix + theme.SidebarTitle.Render(cleanTitle)
+	labelWidth := prefixWidth + ansi.StringWidth(cleanTitle)
+	ruleWidth := maxInt(0, safeWidth-labelWidth-1)
 	if ruleWidth <= 0 {
 		return truncateAndPadANSI(label, safeWidth)
 	}
@@ -3489,6 +3548,68 @@ func sidebarPlanRow(item planItem, width int) string {
 	}
 	text := truncateAndPadANSI(strings.TrimSpace(item.Text), textWidth)
 	return marker + " " + theme.SidebarValue.Render(text)
+}
+
+// contextLimitForModel returns an approximate context window token limit for
+// the given model name. Returns 0 when the model is unknown.
+func contextLimitForModel(model string) int {
+	m := strings.ToLower(model)
+	switch {
+	case strings.Contains(m, "opus"):
+		return 200000
+	case strings.Contains(m, "sonnet"):
+		return 200000
+	case strings.Contains(m, "haiku"):
+		return 200000
+	case strings.Contains(m, "gpt-4o"):
+		return 128000
+	case strings.Contains(m, "gpt-4"):
+		return 128000
+	case strings.Contains(m, "o1") || strings.Contains(m, "o3"):
+		return 200000
+	default:
+		return 0
+	}
+}
+
+func normalizeSidebarValue(s string) string {
+	s = strings.TrimSpace(s)
+	if s == "" || strings.Contains(strings.ToLower(s), "unavailable") {
+		return "n/a"
+	}
+	return s
+}
+
+// taskShortName returns a display-friendly name for an agent/task,
+// collapsing datetime-stamped task IDs like "Task 2026-03-27 18:52:39" to "task".
+func taskShortName(name string) string {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return "n/a"
+	}
+	if strings.HasPrefix(name, "Task ") && len(name) > 5 {
+		return "task"
+	}
+	return name
+}
+
+func renderMiniProgressBar(pct float64, barWidth int) string {
+	if barWidth <= 0 {
+		return ""
+	}
+	if pct < 0 {
+		pct = 0
+	}
+	if pct > 1 {
+		pct = 1
+	}
+	filled := int(float64(barWidth) * pct)
+	if filled > barWidth {
+		filled = barWidth
+	}
+	fillStr := strings.Repeat("█", filled)
+	emptyStr := strings.Repeat("░", barWidth-filled)
+	return theme.ProgressFill.Render(fillStr) + theme.ProgressEmpty.Render(emptyStr)
 }
 
 func agentStatusLabel(status agent.Status) string {

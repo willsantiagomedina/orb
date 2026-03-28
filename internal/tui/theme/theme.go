@@ -40,10 +40,13 @@ var (
 
 	HeaderLogoMark = lipgloss.NewStyle().Foreground(Purple2)
 	HeaderLogoText = lipgloss.NewStyle().Foreground(White).Bold(true)
+	HeaderVersion  = lipgloss.NewStyle().Foreground(Grey1)
 	HeaderDivider  = lipgloss.NewStyle().Foreground(Grey0)
+	HeaderSep      = lipgloss.NewStyle().Foreground(Grey0)
 	HeaderSession  = lipgloss.NewStyle().Foreground(Grey3)
-	HeaderModel    = lipgloss.NewStyle().Foreground(Grey2)
-	HeaderBranch   = lipgloss.NewStyle().Foreground(Purple1)
+	HeaderModel    = lipgloss.NewStyle().Foreground(Grey3)
+	HeaderMode     = lipgloss.NewStyle().Foreground(Grey2)
+	HeaderBranch   = lipgloss.NewStyle().Foreground(Purple3)
 	HeaderAuthOK   = lipgloss.NewStyle().Foreground(Success)
 	HeaderAuthErr  = lipgloss.NewStyle().Foreground(Danger)
 
@@ -81,6 +84,9 @@ var (
 	FooterMuted = lipgloss.NewStyle().Foreground(Grey1)
 	FooterHelp  = lipgloss.NewStyle().Foreground(Purple2)
 
+	InputModePill = lipgloss.NewStyle().Background(Purple0).Foreground(Purple3).Padding(0, 1).Bold(true)
+	InputModeText = lipgloss.NewStyle().Foreground(Grey2)
+
 	SidebarFrame = lipgloss.NewStyle().
 			Background(BG1).
 			Foreground(Grey3).
@@ -93,7 +99,8 @@ var (
 			Padding(1, 1).
 			Border(lipgloss.NormalBorder(), true, true, true, true).
 			BorderForeground(Grey0)
-	SidebarTitle    = lipgloss.NewStyle().Foreground(Grey2).Background(BG1).Bold(true)
+	SidebarTitle    = lipgloss.NewStyle().Foreground(Grey3).Background(BG1).Bold(true)
+	SidebarIcon     = lipgloss.NewStyle().Foreground(Purple2).Background(BG1)
 	SidebarDivider  = lipgloss.NewStyle().Foreground(Grey0).Background(BG1)
 	SidebarLabel    = lipgloss.NewStyle().Foreground(Grey1).Background(BG1)
 	SidebarValue    = lipgloss.NewStyle().Foreground(Grey3).Background(BG1)
@@ -101,6 +108,17 @@ var (
 	SidebarMeta     = lipgloss.NewStyle().Foreground(Grey1).Background(BG1)
 	SidebarPlanTodo = lipgloss.NewStyle().Foreground(Warning).Background(BG1)
 	SidebarPlanDone = lipgloss.NewStyle().Foreground(Success).Background(BG1)
+
+	ProgressFill  = lipgloss.NewStyle().Foreground(Purple2)
+	ProgressEmpty = lipgloss.NewStyle().Foreground(Grey1)
+
+	ShortcutCard = lipgloss.NewStyle().
+			Background(BG2).
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(Grey1).
+			Padding(0, 2)
+	ShortcutKey  = lipgloss.NewStyle().Background(Purple0).Foreground(Purple3).Padding(0, 1)
+	ShortcutDesc = lipgloss.NewStyle().Foreground(Grey2)
 )
 
 // Message styles.
@@ -108,9 +126,9 @@ var (
 	UserMessageBox = lipgloss.NewStyle().
 			Background(BG2).
 			Border(lipgloss.RoundedBorder()).
-			BorderForeground(Grey0).
+			BorderForeground(Grey1).
 			Padding(0, 1)
-	UserLabel     = lipgloss.NewStyle().Foreground(Grey2).Italic(true).Faint(true)
+	UserLabel     = lipgloss.NewStyle().Foreground(Grey3).Bold(true)
 	UserTimestamp = lipgloss.NewStyle().Foreground(Grey1)
 	UserBody      = lipgloss.NewStyle().Foreground(Grey4)
 
@@ -122,16 +140,16 @@ var (
 
 	ToolCallBox = lipgloss.NewStyle().
 			Background(BG2).
-			Border(lipgloss.NormalBorder()).
+			Border(lipgloss.RoundedBorder()).
 			BorderForeground(Purple1).
 			Padding(0, 1)
-	ToolCallLabel  = lipgloss.NewStyle().Foreground(Purple2).Italic(true)
-	ToolCallName   = lipgloss.NewStyle().Foreground(White).Bold(true)
+	ToolCallArrow = lipgloss.NewStyle().Foreground(Purple2).Bold(true)
+	ToolCallName  = lipgloss.NewStyle().Foreground(White).Bold(true)
 	ToolStatusRun  = lipgloss.NewStyle().Foreground(Warning)
 	ToolStatusDone = lipgloss.NewStyle().Foreground(Success)
 	ToolStatusErr  = lipgloss.NewStyle().Foreground(Danger)
 	ToolArgs       = lipgloss.NewStyle().Foreground(Grey2)
-	ToolResult     = lipgloss.NewStyle().Foreground(Grey1).Italic(true)
+	ToolResult     = lipgloss.NewStyle().Foreground(Grey2)
 
 	ReasoningRule = lipgloss.NewStyle().Foreground(Grey0)
 	ReasoningHead = lipgloss.NewStyle().Foreground(Grey2).Italic(true)
